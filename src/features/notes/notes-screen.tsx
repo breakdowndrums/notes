@@ -463,8 +463,13 @@ function NoteTile({
   const bodyTextColor = showActionBar ? '#777f87' : isQuiet ? '#515960' : theme.textSecondary;
 
   return (
-      <View
-        style={[
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open note ${note.title || note.body || 'Untitled note'}`}
+        onPress={active ? undefined : onPress}
+        onLongPress={onLongPress}
+        delayLongPress={320}
+        style={({ pressed }) => [
           styles.noteTile,
           {
             width,
@@ -472,17 +477,11 @@ function NoteTile({
             borderColor: active ? '#4f7f74' : theme.backgroundSelected,
             elevation: active ? 10 : 0,
             marginBottom: itemGap,
-            opacity: isQuiet ? 0.62 : 1,
+            opacity: isQuiet ? 0.62 : pressed && !active ? 0.75 : 1,
           },
         ]}>
         <View style={[styles.cardHeaderRow, { width: textWidth }]}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Open note ${note.title}`}
-            onPress={active ? undefined : onPress}
-            onLongPress={onLongPress}
-            delayLongPress={320}
-            style={({ pressed }) => [styles.cardTitleButton, pressed && !active && styles.pressed]}>
+          <View style={styles.cardTitleButton}>
             {title ? (
               <ThemedText type="smallBold" style={[styles.noteTitle, { color: textColor }]}>
                 {title}
@@ -494,7 +493,7 @@ function NoteTile({
             ) : (
               <View style={styles.emptyCardTitle} />
             )}
-          </Pressable>
+          </View>
           {showBoardStatus && assignedBoards.length ? (
             <View style={styles.boardStatusBadges}>
               {assignedBoards.map((board) => (
@@ -526,30 +525,18 @@ function NoteTile({
           ) : null}
         </View>
         {shouldShowBody && !isBodyOnly ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Open note ${note.title}`}
-            onPress={active ? undefined : onPress}
-            onLongPress={onLongPress}
-            delayLongPress={320}
-            style={({ pressed }) => [styles.cardBodyButton, pressed && !active && styles.pressed]}>
+          <View style={styles.cardBodyButton}>
             <ThemedText type="small" style={[styles.noteBody, { color: bodyTextColor }]} numberOfLines={3}>
               {bodyWithoutDuplicateTitle}
             </ThemedText>
-          </Pressable>
+          </View>
         ) : null}
         {bodyOnlyPreview.tail ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Open note ${note.title}`}
-            onPress={active ? undefined : onPress}
-            onLongPress={onLongPress}
-            delayLongPress={320}
-            style={({ pressed }) => [styles.cardBodyButton, pressed && !active && styles.pressed]}>
+          <View style={styles.cardBodyButton}>
             <ThemedText type="smallBold" style={[styles.noteTitle, { color: bodyTextColor }]} numberOfLines={1}>
               {bodyOnlyPreview.tail}
             </ThemedText>
-          </Pressable>
+          </View>
         ) : null}
         {showActionBar ? (
           <View style={styles.libraryActionRow}>
@@ -592,7 +579,7 @@ function NoteTile({
             ))}
           </View>
         ) : null}
-      </View>
+      </Pressable>
   );
 }
 

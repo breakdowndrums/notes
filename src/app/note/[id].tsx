@@ -208,29 +208,70 @@ export default function NoteDetailScreen() {
   const allLibraryCategoryIds = noteKind === 'library' ? getLibraryCategoryIds(notes, libraryCategoryIds) : [];
   const canSave = Boolean(title.trim() || body.trim());
   const saveMutation = useMutation({
-    mutationFn: () =>
-      updateNote({
+    mutationFn: (input: {
+      kind: NoteKind;
+      id: string;
+      title: string;
+      body: string;
+      boardIds: string[];
+      categoryIds: string[];
+    }) =>
+      updateNote(input),
+    onMutate: async (input) => {
+      const queryKey = ['notes', input.kind, user?.id] as const;
+
+      await queryClient.cancelQueries({ queryKey });
+      const previousNotes = queryClient.getQueryData<Note[]>(queryKey);
+
+      queryClient.setQueryData<Note[]>(queryKey, (currentNotes) =>
+        currentNotes?.map((currentNote) =>
+          currentNote.id === input.id
+            ? {
+                ...currentNote,
+                kind: input.kind,
+                title: input.title.trim(),
+                body: input.body.trim(),
+                boardIds: input.kind === 'library' ? [] : input.boardIds,
+                categoryIds: input.categoryIds,
+                updatedAt: 'Today',
+              }
+            : currentNote,
+        ) ?? [],
+      );
+
+      return { previousNotes, queryKey };
+    },
+    onSuccess: async (_result, input) => {
+      setSavedTitle(input.title);
+      setSavedBody(input.body);
+      setSavedBoardIds(input.kind === 'library' ? [] : input.boardIds);
+      setSavedCategoryId(input.categoryIds[0] ?? null);
+      setSavedKind(input.kind);
+      setIsEditing(false);
+      setFocusedField(null);
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousNotes) {
+        queryClient.setQueryData(context.queryKey, context.previousNotes);
+      }
+
+      Alert.alert('Could not save note', error instanceof Error ? error.message : 'Try again in a moment.');
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notes'] });
+    },
+  });
+
+  function buildSaveInput() {
+    return {
         kind: noteKind,
         id: noteId,
         title,
         body,
         boardIds: noteKind === 'library' ? [] : selectedBoardIds,
         categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['notes'] });
-      setSavedTitle(title);
-      setSavedBody(body);
-      setSavedBoardIds(noteKind === 'library' ? [] : selectedBoardIds);
-      setSavedCategoryId(selectedCategoryId);
-      setSavedKind(noteKind);
-      setIsEditing(false);
-      setFocusedField(null);
-    },
-    onError: (error) => {
-      Alert.alert('Could not save note', error instanceof Error ? error.message : 'Try again in a moment.');
-    },
-  });
+    };
+  }
   const deleteMutation = useMutation({
     mutationFn: () => deleteNote({ id: noteId }),
     onSuccess: async () => {
@@ -337,7 +378,7 @@ export default function NoteDetailScreen() {
     setTimeout(refocusEditor, 140);
   }
 
-  async function persistNote() {
+  function persistNote() {
     if (!user) {
       Alert.alert('Sign in required', 'Sign in from Account before editing synced notes.');
       return false;
@@ -347,15 +388,16 @@ export default function NoteDetailScreen() {
       return false;
     }
 
-    try {
-      await saveMutation.mutateAsync();
-      return true;
-    } catch {
-      return false;
-    }
+    saveMutation.mutate(buildSaveInput());
+    setSavedTitle(title);
+    setSavedBody(body);
+    setSavedBoardIds(noteKind === 'library' ? [] : selectedBoardIds);
+    setSavedCategoryId(selectedCategoryId);
+    setSavedKind(noteKind);
+    return true;
   }
 
-  async function goBack() {
+  function goBack() {
     if ((!note && loadedNoteId !== noteId) || !user) {
       router.replace(returnPath as never);
       return;
@@ -369,11 +411,7 @@ export default function NoteDetailScreen() {
       selectedBoardIds.join('|') !== savedBoardIds.join('|');
 
     if (hasChanges && canSave) {
-      const saved = await persistNote();
-
-      if (!saved) {
-        return;
-      }
+      persistNote();
     }
 
     router.replace(returnPath as never);
