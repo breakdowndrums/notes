@@ -61,5 +61,6 @@ export const Spacing = {
   six: 64,
 } as const;
 
-export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
+export const BottomTabInset = Platform.select({ ios: 44, android: 48 }) ?? 0;
 export const MaxContentWidth = 800;
+export const NoteSurfaceColor = '#121417';

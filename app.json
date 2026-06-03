@@ -4,18 +4,22 @@
     "slug": "Notes",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/notes-icon.png",
     "scheme": "notes",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon"
     },
     "android": {
+      "package": "com.arne.notes",
+      "queries": {
+        "package": [
+          "com.openai.chatgpt"
+        ]
+      },
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/images/notes-icon.png"
       },
       "predictiveBackGestureEnabled": false
     },
@@ -39,6 +43,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "2ace0c9b-26d7-4f6f-858f-a6f92e515a24"
+      }
     }
   }
 }

@@ -1,180 +1,546 @@
-import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
-import { Platform, Pressable, ScrollView, StyleSheet } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'expo-router';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ExternalLink } from '@/components/external-link';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Collapsible } from '@/components/ui/collapsible';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import {
+  clampLibraryDayStartHour,
+  DefaultLibraryDayStartHour,
+  LibraryDayStartHourStorageKey,
+} from '@/constants/preferences';
+import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useAuth } from '@/lib/auth/auth-provider';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase/client';
 
-export default function TabTwoScreen() {
-  const safeAreaInsets = useSafeAreaInsets();
-  const insets = {
-    ...safeAreaInsets,
-    bottom: safeAreaInsets.bottom + BottomTabInset + Spacing.three,
-  };
+export default function AccountScreen() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [libraryDayStartDraft, setLibraryDayStartDraft] = useState(String(DefaultLibraryDayStartHour));
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const { isAuthReady, user } = useAuth();
   const theme = useTheme();
+  const contentWidth = Math.min(Math.max(0, width - Spacing.two * 2), MaxContentWidth);
 
-  const contentPlatformStyle = Platform.select({
-    android: {
-      paddingTop: insets.top,
-      paddingLeft: insets.left,
-      paddingRight: insets.right,
-      paddingBottom: insets.bottom,
-    },
-    web: {
-      paddingTop: Spacing.six,
-      paddingBottom: Spacing.four,
-    },
-  });
+  useEffect(() => {
+    AsyncStorage.getItem(LibraryDayStartHourStorageKey).then((storedHour) => {
+      if (storedHour === null) {
+        return;
+      }
+
+      setLibraryDayStartDraft(String(clampLibraryDayStartHour(Number(storedHour))));
+    });
+  }, []);
+
+  function getEmailRedirectTo() {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      return window.location.origin;
+    }
+
+    return 'notes://';
+  }
+
+  function validateCredentials() {
+    if (!email.trim()) {
+      Alert.alert('Email required', 'Enter an email address.');
+      return false;
+    }
+
+    if (!isSupabaseConfigured) {
+      Alert.alert('Supabase is not configured', 'Add your EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY values first.');
+      return false;
+    }
+
+    if (password.length < 6) {
+      Alert.alert('Password too short', 'Use at least 6 characters.');
+      return false;
+    }
+
+    return true;
+  }
+
+  async function signInWithPassword() {
+    if (!validateCredentials()) {
+      return;
+    }
+
+    setAuthMessage(null);
+    setIsSubmitting(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    setIsSubmitting(false);
+
+    if (error) {
+      setAuthMessage(error.message);
+      Alert.alert('Sign-in failed', error.message);
+      return;
+    }
+
+    setAuthMessage('Signed in.');
+  }
+
+  async function signUpWithPassword() {
+    if (!validateCredentials()) {
+      return;
+    }
+
+    setAuthMessage(null);
+    setIsSubmitting(true);
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: {
+        emailRedirectTo: getEmailRedirectTo(),
+      },
+    });
+    setIsSubmitting(false);
+
+    if (error) {
+      setAuthMessage(error.message);
+      Alert.alert('Sign-up failed', error.message);
+      return;
+    }
+
+    if (data.session) {
+      setAuthMessage('Account created. You are signed in.');
+      Alert.alert('Account created', 'You are signed in.');
+      return;
+    }
+
+    setAuthMessage('Check your email to confirm the account, then sign in.');
+    Alert.alert('Check your email', 'Confirm your email address, then sign in.');
+  }
+
+  async function resendConfirmationEmail() {
+    if (!email.trim()) {
+      Alert.alert('Email required', 'Enter the email address you used to create the account.');
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      Alert.alert('Supabase is not configured', 'Add your EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY values first.');
+      return;
+    }
+
+    setAuthMessage(null);
+    setIsSubmitting(true);
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email: email.trim(),
+      options: {
+        emailRedirectTo: getEmailRedirectTo(),
+      },
+    });
+    setIsSubmitting(false);
+
+    if (error) {
+      setAuthMessage(error.message);
+      Alert.alert('Could not resend email', error.message);
+      return;
+    }
+
+    setAuthMessage('Confirmation email sent. Open it, then come back and sign in.');
+  }
+
+  async function sendPasswordResetEmail() {
+    if (!email.trim()) {
+      Alert.alert('Email required', 'Enter the email address for your account.');
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      Alert.alert('Supabase is not configured', 'Add your EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY values first.');
+      return;
+    }
+
+    setAuthMessage(null);
+    setIsSubmitting(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: getEmailRedirectTo(),
+    });
+    setIsSubmitting(false);
+
+    if (error) {
+      setAuthMessage(error.message);
+      Alert.alert('Could not send reset email', error.message);
+      return;
+    }
+
+    setAuthMessage('Password reset email sent. Open it, then set a new password here.');
+  }
+
+  async function updatePassword() {
+    if (!isSupabaseConfigured) {
+      Alert.alert('Supabase is not configured', 'Add your EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY values first.');
+      return;
+    }
+
+    if (password.length < 6) {
+      Alert.alert('Password too short', 'Use at least 6 characters.');
+      return;
+    }
+
+    setAuthMessage(null);
+    setIsSubmitting(true);
+    const { error } = await supabase.auth.updateUser({ password });
+    setIsSubmitting(false);
+
+    if (error) {
+      setAuthMessage(error.message);
+      Alert.alert('Could not update password', error.message);
+      return;
+    }
+
+    setPassword('');
+    setAuthMessage('Password updated. You can keep using the app.');
+  }
+
+  async function saveLibraryDayStartHour() {
+    const nextHour = clampLibraryDayStartHour(Number(libraryDayStartDraft));
+    const nextDraft = String(nextHour);
+
+    setLibraryDayStartDraft(nextDraft);
+    await AsyncStorage.setItem(LibraryDayStartHourStorageKey, nextDraft);
+    setAuthMessage(`Library day now starts at ${nextDraft.padStart(2, '0')}:00.`);
+  }
+
+  async function signOut() {
+    setIsSigningOut(true);
+    const { error } = await supabase.auth.signOut();
+    setIsSigningOut(false);
+
+    if (error) {
+      Alert.alert('Sign-out failed', error.message);
+    }
+  }
 
   return (
-    <ScrollView
-      style={[styles.scrollView, { backgroundColor: theme.background }]}
-      contentInset={insets}
-      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
-      <ThemedView style={styles.container}>
-        <ThemedView style={styles.titleContainer}>
-          <ThemedText type="subtitle">Explore</ThemedText>
-          <ThemedText style={styles.centerText} themeColor="textSecondary">
-            This starter app includes example{'\n'}code to help you get started.
-          </ThemedText>
-
-          <ExternalLink href="https://docs.expo.dev" asChild>
-            <Pressable style={({ pressed }) => pressed && styles.pressed}>
-              <ThemedView type="backgroundElement" style={styles.linkButton}>
-                <ThemedText type="link">Expo documentation</ThemedText>
-                <SymbolView
-                  tintColor={theme.text}
-                  name={{ ios: 'arrow.up.right.square', android: 'link', web: 'link' }}
-                  size={12}
-                />
-              </ThemedView>
-            </Pressable>
-          </ExternalLink>
-        </ThemedView>
-
-        <ThemedView style={styles.sectionsWrapper}>
-          <Collapsible title="File-based routing">
-            <ThemedText type="small">
-              This app has two screens: <ThemedText type="code">src/app/index.tsx</ThemedText> and{' '}
-              <ThemedText type="code">src/app/explore.tsx</ThemedText>
+    <ThemedView style={styles.screen}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={styles.safeArea}>
+        <ScrollView
+          contentContainerStyle={[styles.content, { width: contentWidth, paddingBottom: insets.bottom + Spacing.four }]}
+          keyboardShouldPersistTaps="handled">
+          <View style={styles.header}>
+            <View style={styles.headerRow}>
+              <ThemedText type="subtitle">Account</ThemedText>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back to notes"
+                onPress={() => router.replace('/')}
+                style={({ pressed }) => [styles.backButton, { borderColor: theme.backgroundSelected }, pressed && styles.pressed]}>
+                <ThemedText type="smallBold">Notes</ThemedText>
+              </Pressable>
+            </View>
+            <ThemedText type="small" themeColor="textSecondary">
+              {isSupabaseConfigured ? 'Supabase auth is wired for this app.' : 'Add Supabase env keys to enable auth and sync.'}
             </ThemedText>
-            <ThemedText type="small">
-              The layout file in <ThemedText type="code">src/app/_layout.tsx</ThemedText> sets up
-              the tab navigator.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/router/introduction">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+          </View>
 
-          <Collapsible title="Android, iOS, and web support">
-            <ThemedView type="backgroundElement" style={styles.collapsibleContent}>
-              <ThemedText type="small">
-                You can open this project on Android, iOS, and the web. To open the web version,
-                press <ThemedText type="smallBold">w</ThemedText> in the terminal running this
-                project.
+          <View style={[styles.panel, { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}>
+            <ThemedText type="smallBold">Session</ThemedText>
+            <View style={[styles.statusPill, { backgroundColor: theme.background }]}>
+              <View style={[styles.statusDot, { backgroundColor: user ? '#2f6f73' : '#d18b37' }]} />
+              <ThemedText type="small" themeColor="textSecondary">
+                {!isAuthReady ? 'Checking session...' : user ? user.email ?? 'Signed in' : 'Signed out'}
               </ThemedText>
-              <Image
-                source={require('@/assets/images/tutorial-web.png')}
-                style={styles.imageTutorial}
-              />
-            </ThemedView>
-          </Collapsible>
+            </View>
+            {user ? (
+              <>
+                <ThemedText type="smallBold">Set new password</ThemedText>
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="new-password"
+                  textContentType="newPassword"
+                  importantForAutofill="yes"
+                  secureTextEntry
+                  placeholder="New password"
+                  placeholderTextColor={theme.textSecondary}
+                  style={[
+                    styles.input,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      color: theme.text,
+                      backgroundColor: theme.background,
+                    },
+                  ]}
+                />
+                <Pressable
+                  onPress={updatePassword}
+                  disabled={isSubmitting}
+                  style={({ pressed }) => [styles.button, (pressed || isSubmitting) && styles.pressed]}>
+                  <ThemedText type="smallBold" style={styles.buttonText}>
+                    {isSubmitting ? 'Working...' : 'Update password'}
+                  </ThemedText>
+                </Pressable>
+                <Pressable
+                  onPress={signOut}
+                  disabled={isSigningOut}
+                  style={({ pressed }) => [styles.secondaryButton, { borderColor: theme.backgroundSelected }, (pressed || isSigningOut) && styles.pressed]}>
+                  <ThemedText type="smallBold">{isSigningOut ? 'Signing out...' : 'Sign out'}</ThemedText>
+                </Pressable>
+                {authMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.authMessage}>
+                    {authMessage}
+                  </ThemedText>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <ThemedText type="smallBold">Email and password</ThemedText>
+                <TextInput
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="you@example.com"
+                  placeholderTextColor={theme.textSecondary}
+                  style={[
+                    styles.input,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      color: theme.text,
+                      backgroundColor: theme.background,
+                    },
+                  ]}
+                />
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="password"
+                  textContentType="password"
+                  importantForAutofill="yes"
+                  secureTextEntry
+                  placeholder="Password"
+                  placeholderTextColor={theme.textSecondary}
+                  style={[
+                    styles.input,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      color: theme.text,
+                      backgroundColor: theme.background,
+                    },
+                  ]}
+                />
+                <Pressable
+                  onPress={signInWithPassword}
+                  disabled={isSubmitting}
+                  style={({ pressed }) => [styles.button, (pressed || isSubmitting) && styles.pressed]}>
+                  <ThemedText type="smallBold" style={styles.buttonText}>
+                    {isSubmitting ? 'Working...' : 'Sign in'}
+                  </ThemedText>
+                </Pressable>
+                <Pressable
+                  onPress={signUpWithPassword}
+                  disabled={isSubmitting}
+                  style={({ pressed }) => [styles.secondaryButton, { borderColor: theme.backgroundSelected }, (pressed || isSubmitting) && styles.pressed]}>
+                  <ThemedText type="smallBold">Create account</ThemedText>
+                </Pressable>
+                <Pressable
+                  onPress={resendConfirmationEmail}
+                  disabled={isSubmitting}
+                  style={({ pressed }) => [styles.secondaryButton, { borderColor: theme.backgroundSelected }, (pressed || isSubmitting) && styles.pressed]}>
+                  <ThemedText type="smallBold">Resend confirmation</ThemedText>
+                </Pressable>
+                <Pressable
+                  onPress={sendPasswordResetEmail}
+                  disabled={isSubmitting}
+                  style={({ pressed }) => [styles.secondaryButton, { borderColor: theme.backgroundSelected }, (pressed || isSubmitting) && styles.pressed]}>
+                  <ThemedText type="smallBold">Reset password</ThemedText>
+                </Pressable>
+                {authMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.authMessage}>
+                    {authMessage}
+                  </ThemedText>
+                ) : null}
+              </>
+            )}
+          </View>
 
-          <Collapsible title="Images">
-            <ThemedText type="small">
-              For static images, you can use the <ThemedText type="code">@2x</ThemedText> and{' '}
-              <ThemedText type="code">@3x</ThemedText> suffixes to provide files for different
-              screen densities.
+          <View style={[styles.panel, { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}>
+            <ThemedText type="smallBold">Preferences</ThemedText>
+            <View style={[styles.preferenceRow, { backgroundColor: theme.background }]}>
+              <View style={styles.preferenceCopy}>
+                <ThemedText type="smallBold">Library day starts</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  Notes before this time still count as yesterday.
+                </ThemedText>
+              </View>
+              <View style={styles.preferenceInputWrap}>
+                <TextInput
+                  value={libraryDayStartDraft}
+                  onChangeText={(value) => setLibraryDayStartDraft(value.replace(/[^0-9]/g, '').slice(0, 2))}
+                  onBlur={saveLibraryDayStartHour}
+                  onSubmitEditing={saveLibraryDayStartHour}
+                  keyboardType="number-pad"
+                  maxLength={2}
+                  selectTextOnFocus
+                  placeholder="5"
+                  placeholderTextColor={theme.textSecondary}
+                  style={[
+                    styles.preferenceInput,
+                    {
+                      borderColor: theme.backgroundSelected,
+                      color: theme.text,
+                      backgroundColor: theme.backgroundElement,
+                    },
+                  ]}
+                />
+                <ThemedText type="smallBold">:00</ThemedText>
+              </View>
+            </View>
+            <ThemedText type="small" themeColor="textSecondary">
+              Use 0-23. Changes apply when you return to Library.
             </ThemedText>
-            <Image source={require('@/assets/images/react-logo.png')} style={styles.imageReact} />
-            <ExternalLink href="https://reactnative.dev/docs/images">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+          </View>
 
-          <Collapsible title="Light and dark mode components">
-            <ThemedText type="small">
-              This template has light and dark mode support. The{' '}
-              <ThemedText type="code">useColorScheme()</ThemedText> hook lets you inspect what the
-              user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
+          <View style={[styles.panel, { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}>
+            <ThemedText type="smallBold">Backend checklist</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">
+              Run the SQL, add env keys, sign in, then tap + on the Board tab to create your synced board.
             </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+            <ThemedText type="small" themeColor="textSecondary">
+              Supabase configured: {isSupabaseConfigured ? 'yes' : 'no'}
+            </ThemedText>
+            <ThemedText type="code">supabase/schema.sql</ThemedText>
+          </View>
 
-          <Collapsible title="Animations">
-            <ThemedText type="small">
-              This template includes an example of an animated component. The{' '}
-              <ThemedText type="code">src/components/ui/collapsible.tsx</ThemedText> component uses
-              the powerful <ThemedText type="code">react-native-reanimated</ThemedText> library to
-              animate opening this hint.
+          <View style={[styles.panel, styles.developerNote, { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected }]}>
+            <ThemedText type="smallBold">Development note</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary">
+              Synced account ready. Note persistence comes next.
             </ThemedText>
-          </Collapsible>
-        </ThemedView>
-        {Platform.OS === 'web' && <WebBadge />}
-      </ThemedView>
-    </ScrollView>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </ThemedView>
   );
 }
 
 const styles = StyleSheet.create({
-  scrollView: {
+  screen: {
     flex: 1,
   },
-  contentContainer: {
+  safeArea: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  content: {
+    alignSelf: 'center',
+    paddingTop: Spacing.four,
+    gap: Spacing.three,
+  },
+  header: {
+    gap: Spacing.one,
+  },
+  headerRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+  },
+  backButton: {
+    minHeight: 40,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.three,
+    alignItems: 'center',
     justifyContent: 'center',
   },
-  container: {
-    maxWidth: MaxContentWidth,
-    flexGrow: 1,
-  },
-  titleContainer: {
+  panel: {
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: Spacing.two,
     gap: Spacing.three,
-    alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.six,
   },
-  centerText: {
+  developerNote: {
+    gap: Spacing.one,
+  },
+  statusPill: {
+    minHeight: 44,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  preferenceRow: {
+    minHeight: 64,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+  },
+  preferenceInputWrap: {
+    flexShrink: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+  },
+  preferenceInput: {
+    width: 48,
+    minHeight: 40,
+    borderWidth: 1,
+    borderRadius: 8,
     textAlign: 'center',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  preferenceCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: Spacing.half,
+  },
+  input: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: Spacing.three,
+    fontSize: 16,
+  },
+  button: {
+    minHeight: 48,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#243b37',
+  },
+  buttonText: {
+    color: Colors.light.background,
+  },
+  secondaryButton: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  authMessage: {
+    lineHeight: 19,
   },
   pressed: {
-    opacity: 0.7,
-  },
-  linkButton: {
-    flexDirection: 'row',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.five,
-    justifyContent: 'center',
-    gap: Spacing.one,
-    alignItems: 'center',
-  },
-  sectionsWrapper: {
-    gap: Spacing.five,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-  },
-  collapsibleContent: {
-    alignItems: 'center',
-  },
-  imageTutorial: {
-    width: '100%',
-    aspectRatio: 296 / 171,
-    borderRadius: Spacing.three,
-    marginTop: Spacing.two,
-  },
-  imageReact: {
-    width: 100,
-    height: 100,
-    alignSelf: 'center',
+    opacity: 0.72,
   },
 });
