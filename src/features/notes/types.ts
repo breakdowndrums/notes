@@ -1,3 +1,5 @@
+import type { CompoundTodoMeta } from './compound-todo';
+
 export type Note = {
   id: string;
   kind: NoteKind;
@@ -8,6 +10,7 @@ export type Note = {
   categoryIds: string[];
   pinned?: boolean;
   done?: boolean;
+  compound?: CompoundTodoMeta | null;
   position: number;
   createdAt: string;
   updatedAt: string;

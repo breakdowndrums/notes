@@ -9,7 +9,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, NoteSurfaceColor, Spacing } from '@/constants/theme';
-import { deleteNote, fetchNotesByKind, updateNote } from '@/features/notes/note-api';
+import { createCompoundNotePage, deleteNote, fetchNotesByKind, updateNote } from '@/features/notes/note-api';
 import {
   libraryBoards,
   sampleBoards,
@@ -194,6 +194,7 @@ export default function NoteDetailScreen() {
   const [libraryCategoryIds, setLibraryCategoryIds] = useState<string[]>([]);
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [isCategorySheetOpen, setIsCategorySheetOpen] = useState(false);
+  const [isCompoundActionsOpen, setIsCompoundActionsOpen] = useState(false);
   const [categoryDraft, setCategoryDraft] = useState('');
   const [isEditing, setIsEditing] = useState(false);
   const [focusedField, setFocusedField] = useState<'title' | 'body' | null>(null);
@@ -207,14 +208,24 @@ export default function NoteDetailScreen() {
   const allTodoCategories = noteKind === 'note' ? getTodoCategories(notes, todoCategoryIds) : [];
   const allLibraryCategoryIds = noteKind === 'library' ? getLibraryCategoryIds(notes, libraryCategoryIds) : [];
   const canSave = Boolean(title.trim() || body.trim());
+  const compoundNotes = noteKind === 'note' && note?.compound?.compoundId
+    ? notes
+        .filter((item) => item.kind === 'note' && item.compound?.compoundId === note.compound?.compoundId)
+        .sort((firstNote, secondNote) => (firstNote.compound?.compoundPosition ?? 0) - (secondNote.compound?.compoundPosition ?? 0))
+    : note
+      ? [note]
+      : [];
+  const currentCompoundIndex = Math.max(0, compoundNotes.findIndex((item) => item.id === noteId));
   const saveMutation = useMutation({
     mutationFn: (input: {
       kind: NoteKind;
       id: string;
       title: string;
       body: string;
+      done: boolean;
       boardIds: string[];
       categoryIds: string[];
+      compound?: Note['compound'];
     }) =>
       updateNote(input),
     onMutate: async (input) => {
@@ -233,6 +244,8 @@ export default function NoteDetailScreen() {
                 body: input.body.trim(),
                 boardIds: input.kind === 'library' ? [] : input.boardIds,
                 categoryIds: input.categoryIds,
+                done: input.done,
+                compound: input.compound ?? null,
                 updatedAt: 'Today',
               }
             : currentNote,
@@ -268,6 +281,8 @@ export default function NoteDetailScreen() {
         id: noteId,
         title,
         body,
+        done: note?.done ?? false,
+        compound: noteKind === 'note' ? note?.compound ?? null : null,
         boardIds: noteKind === 'library' ? [] : selectedBoardIds,
         categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
     };
@@ -284,6 +299,31 @@ export default function NoteDetailScreen() {
     },
     onError: (error) => {
       Alert.alert('Could not delete note', error instanceof Error ? error.message : 'Try again in a moment.');
+    },
+  });
+  const createCompoundPageMutation = useMutation({
+    mutationFn: ({ direction }: { direction: 'before' | 'after' }) => {
+      if (!user || !note) {
+        throw new Error('Missing source todo.');
+      }
+
+      return createCompoundNotePage({
+        sourceNote: note,
+        direction,
+        title: '',
+        body: '',
+        ownerId: user.id,
+      });
+    },
+    onSuccess: async (newNoteId) => {
+      await queryClient.invalidateQueries({ queryKey: ['notes'] });
+      router.replace({
+        pathname: '/note/[id]',
+        params: { id: newNoteId, kind: 'note' },
+      });
+    },
+    onError: (error) => {
+      Alert.alert('Could not add linked todo', error instanceof Error ? error.message : 'Try again in a moment.');
     },
   });
 
@@ -445,6 +485,8 @@ export default function NoteDetailScreen() {
         id: noteId,
         title,
         body,
+        done: note?.done ?? false,
+        compound: nextKind === 'note' ? note?.compound ?? null : null,
         boardIds: nextBoardIds,
         categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
       });
@@ -461,6 +503,18 @@ export default function NoteDetailScreen() {
     } catch (error) {
       Alert.alert('Could not move note', error instanceof Error ? error.message : 'Try again in a moment.');
     }
+  }
+
+  function openCompoundSibling(direction: 'before' | 'after') {
+    if (!note || !user || createCompoundPageMutation.isPending) {
+      if (!user) {
+        Alert.alert('Sign in required', 'Sign in from Account before adding linked todos.');
+      }
+      return;
+    }
+
+    setIsCompoundActionsOpen(false);
+    createCompoundPageMutation.mutate({ direction });
   }
 
   function createTodoSubcategory() {
@@ -483,6 +537,11 @@ export default function NoteDetailScreen() {
   }
 
   function stepBackCategorySheet() {
+    if (isCompoundActionsOpen) {
+      setIsCompoundActionsOpen(false);
+      return true;
+    }
+
     if (!isCategorySheetOpen) {
       return false;
     }
@@ -754,7 +813,22 @@ export default function NoteDetailScreen() {
               style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
               <Ionicons name="arrow-back" size={24} color={theme.text} />
             </Pressable>
-            <View style={styles.headerSpacer} />
+            {noteKind === 'note' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={isCompoundActionsOpen ? 'Hide linked todo actions' : 'Show linked todo actions'}
+                onPress={() => setIsCompoundActionsOpen((current) => !current)}
+                style={({ pressed }) => [styles.plainIconButton, pressed && styles.pressed]}>
+                <Ionicons name="git-branch-outline" size={21} color={theme.text} />
+              </Pressable>
+            ) : null}
+            <View style={styles.headerSpacer}>
+              {noteKind === 'note' && compoundNotes.length > 1 ? (
+                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+                  {currentCompoundIndex + 1} of {compoundNotes.length}
+                </ThemedText>
+              ) : null}
+            </View>
             <View style={styles.headerActions}>
               <Pressable
                 accessibilityRole="button"
@@ -783,6 +857,70 @@ export default function NoteDetailScreen() {
               </Pressable>
             </View>
           </View>
+          {noteKind === 'note' && isCompoundActionsOpen ? (
+            <View style={styles.compoundActionsPanel}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add note before"
+                onPress={() => openCompoundSibling('before')}
+                style={({ pressed }) => [styles.compoundActionButton, pressed && styles.pressed]}>
+                <Ionicons name="add-outline" size={18} color={theme.text} />
+                <ThemedText type="smallBold">Before</ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add note after"
+                onPress={() => openCompoundSibling('after')}
+                style={({ pressed }) => [styles.compoundActionButton, pressed && styles.pressed]}>
+                <Ionicons name="add-outline" size={18} color={theme.text} />
+                <ThemedText type="smallBold">After</ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open previous linked note"
+                disabled={currentCompoundIndex <= 0}
+                onPress={() => {
+                  setIsCompoundActionsOpen(false);
+                  const previousNote = compoundNotes[currentCompoundIndex - 1];
+                  if (previousNote) {
+                    router.replace({
+                      pathname: '/note/[id]',
+                      params: { id: previousNote.id, kind: 'note' },
+                    });
+                  }
+                }}
+                style={({ pressed }) => [
+                  styles.compoundActionButton,
+                  currentCompoundIndex <= 0 && styles.disabled,
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name="chevron-back" size={18} color={theme.text} />
+                <ThemedText type="smallBold">Previous</ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Open next linked note"
+                disabled={currentCompoundIndex >= compoundNotes.length - 1}
+                onPress={() => {
+                  setIsCompoundActionsOpen(false);
+                  const nextNote = compoundNotes[currentCompoundIndex + 1];
+                  if (nextNote) {
+                    router.replace({
+                      pathname: '/note/[id]',
+                      params: { id: nextNote.id, kind: 'note' },
+                    });
+                  }
+                }}
+                style={({ pressed }) => [
+                  styles.compoundActionButton,
+                  currentCompoundIndex >= compoundNotes.length - 1 && styles.disabled,
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name="chevron-forward" size={18} color={theme.text} />
+                <ThemedText type="smallBold">Next</ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
 
           {!isNoteAvailable ? (
             <View style={[styles.emptyState, { borderColor: theme.backgroundSelected }]}>
@@ -824,7 +962,6 @@ export default function NoteDetailScreen() {
                   placeholderTextColor={theme.textSecondary}
                   style={[styles.bodyInput, { color: theme.text }]}
                 />
-
               </ScrollView>
 
               <View style={[styles.categoryPicker, { bottom: keyboardHeight ? keyboardHeight + CategoryKeyboardLift : insets.bottom }]}>
@@ -920,13 +1057,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.one,
   },
+  compoundActionsPanel: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.one,
+    paddingBottom: Spacing.two,
+  },
   headerSpacer: {
     flex: 1,
+    alignItems: 'center',
   },
   iconButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  plainIconButton: {
+    width: 32,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -939,6 +1089,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#1d2023',
+  },
+  compoundActionButton: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.half,
+    borderRadius: 10,
+    paddingHorizontal: Spacing.two,
     backgroundColor: '#1d2023',
   },
   saveButton: {

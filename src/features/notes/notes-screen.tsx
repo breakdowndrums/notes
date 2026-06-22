@@ -37,6 +37,7 @@ import {
 } from '@/constants/preferences';
 import { Colors, MaxContentWidth, NoteSurfaceColor, Spacing } from '@/constants/theme';
 import {
+  deleteNote,
   deleteLibraryCategory,
   fetchNotesByKind,
   renameLibraryCategory,
@@ -350,6 +351,23 @@ function splitTextAtWord(value: string, maxLength: number) {
   };
 }
 
+function getCompoundGroupKey(note: Note) {
+  return note.compound?.compoundId ?? note.id;
+}
+
+function getCompoundProgressLabel(groupNotes: Note[], currentNote: Note) {
+  if (groupNotes.length <= 1) {
+    return null;
+  }
+
+  const currentIndex = Math.max(0, groupNotes.findIndex((note) => note.id === currentNote.id));
+  return `${currentIndex + 1}/${groupNotes.length}`;
+}
+
+function getCompoundAnchorPosition(groupNotes: Note[]) {
+  return Math.min(...groupNotes.map((note) => note.position));
+}
+
 function FilterChip({
   label,
   toneId,
@@ -391,8 +409,8 @@ function FilterChip({
   );
 }
 
-function MetadataChip({ label, toneId }: { label: string; toneId: string }) {
-  const tone = getCategoryTone(toneId);
+function MetadataChip({ label, toneId }: { label: string; toneId: string | null }) {
+  const tone = toneId ? getCategoryTone(toneId) : defaultCategoryTone;
 
   return (
     <View style={[styles.metadataChip, { backgroundColor: tone.backgroundColor }]}>
@@ -405,6 +423,7 @@ function MetadataChip({ label, toneId }: { label: string; toneId: string }) {
 
 function NoteTile({
   note,
+  compoundProgressLabel,
   width,
   active,
   itemGap,
@@ -417,6 +436,8 @@ function NoteTile({
   onOpenChatGPT,
   onOpenUrl,
   onToggleDone,
+  onAdvanceTodoStep,
+  onDeleteTodo,
   onMoveToPreviousBoard,
   onMoveToNextBoard,
   boards,
@@ -424,6 +445,7 @@ function NoteTile({
   showBoardActions = true,
 }: {
   note: Note;
+  compoundProgressLabel?: string | null;
   width: number;
   active: boolean;
   itemGap: number;
@@ -436,6 +458,8 @@ function NoteTile({
   onOpenChatGPT?: () => void;
   onOpenUrl?: () => void;
   onToggleDone?: () => void;
+  onAdvanceTodoStep?: () => void;
+  onDeleteTodo?: () => void;
   onMoveToPreviousBoard: () => void;
   onMoveToNextBoard: () => void;
   boards: typeof sampleBoards;
@@ -455,7 +479,8 @@ function NoteTile({
     : body;
   const shouldShowBody = Boolean(bodyWithoutDuplicateTitle && bodyWithoutDuplicateTitle !== title);
   const isBodyOnly = !title && shouldShowBody;
-  const reservedHeaderWidth = (showBoardStatus && assignedBoards.length ? 18 * assignedBoards.length + Spacing.two : 0) + (showBoardActions ? 64 : 0);
+  const todoActionWidth = note.kind === 'note' && (onAdvanceTodoStep || onDeleteTodo) ? 28 + Spacing.one : 0;
+  const reservedHeaderWidth = (showBoardStatus && assignedBoards.length ? 18 * assignedBoards.length + Spacing.two : 0) + (showBoardActions ? 64 + todoActionWidth : 0);
   const bodyOnlyHeaderCharacters = Math.max(24, Math.floor((textWidth - reservedHeaderWidth) / 8.5) * 2);
   const bodyOnlyPreview = isBodyOnly ? splitTextAtWord(bodyWithoutDuplicateTitle, bodyOnlyHeaderCharacters) : { head: '', tail: '' };
   const isQuiet = Boolean(note.done);
@@ -572,8 +597,11 @@ function NoteTile({
             </Pressable>
           </View>
         ) : null}
-        {assignedCategories.length ? (
+        {assignedCategories.length || compoundProgressLabel ? (
           <View style={styles.metadataRow}>
+            {compoundProgressLabel ? (
+              <MetadataChip label={compoundProgressLabel} toneId={null} />
+            ) : null}
             {assignedCategories.slice(0, 1).map((category) => (
               <MetadataChip key={category.id} label={category.title} toneId={category.id} />
             ))}
@@ -601,6 +629,7 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
   const [isCategorySheetOpen, setIsCategorySheetOpen] = useState(false);
   const [categoryDraft, setCategoryDraft] = useState('');
   const [activeActionNoteId, setActiveActionNoteId] = useState<string | null>(null);
+  const [activeTodoBoardPickerNoteId, setActiveTodoBoardPickerNoteId] = useState<string | null>(null);
   const [doneOverrides, setDoneOverrides] = useState<Record<string, boolean>>({});
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [activeDragPageKey, setActiveDragPageKey] = useState<string | null>(null);
@@ -768,22 +797,32 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
     },
   });
   const moveBoardMutation = useMutation({
-    mutationFn: ({ note, boardId }: { note: Note; boardId: string }) =>
-      updateNote({
-        kind: noteKind,
-        id: note.id,
-        title: note.title,
-        body: note.body,
-        boardIds: [boardId],
-        categoryIds: note.categoryIds.slice(0, 1),
-      }),
+    mutationFn: async ({ note, boardId }: { note: Note; boardId: string }) => {
+      const notesToMove = getCompoundNotes(note);
+
+      await Promise.all(
+        notesToMove.map((compoundNote) =>
+          updateNote({
+            kind: noteKind,
+            id: compoundNote.id,
+            title: compoundNote.title,
+            body: compoundNote.body,
+            done: compoundNote.done ?? false,
+            compound: compoundNote.compound ?? null,
+            boardIds: [boardId],
+            categoryIds: compoundNote.categoryIds.slice(0, 1),
+          }),
+        ),
+      );
+    },
     onMutate: async ({ note, boardId }) => {
       await queryClient.cancelQueries({ queryKey: ['notes', noteKind, user?.id] });
       const previousNotes = queryClient.getQueryData<Note[]>(['notes', noteKind, user?.id]);
+      const compoundIds = new Set(getCompoundNotes(note).map((compoundNote) => compoundNote.id));
 
       queryClient.setQueryData<Note[]>(['notes', noteKind, user?.id], (currentNotes) =>
         currentNotes?.map((currentNote) =>
-          currentNote.id === note.id ? { ...currentNote, boardIds: [boardId] } : currentNote,
+          compoundIds.has(currentNote.id) ? { ...currentNote, boardIds: [boardId] } : currentNote,
         ) ?? [],
       );
 
@@ -887,6 +926,65 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
       await queryClient.invalidateQueries({ queryKey: ['notes'] });
     },
   });
+  const todoProgressMutation = useMutation({
+    mutationFn: updateNote,
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: ['notes', noteKind, user?.id] });
+      const previousNotes = queryClient.getQueryData<Note[]>(['notes', noteKind, user?.id]);
+
+      queryClient.setQueryData<Note[]>(['notes', noteKind, user?.id], (currentNotes) =>
+        currentNotes?.map((note) =>
+          note.id === input.id
+            ? {
+                ...note,
+                title: input.title.trim(),
+                body: input.body.trim(),
+                boardIds: input.boardIds,
+                categoryIds: input.categoryIds,
+                done: input.done,
+                compound: input.compound ?? null,
+                updatedAt: 'Today',
+              }
+            : note,
+        ) ?? [],
+      );
+
+      return { previousNotes };
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousNotes) {
+        queryClient.setQueryData(['notes', noteKind, user?.id], context.previousNotes);
+      }
+
+      Alert.alert('Could not update todo', error instanceof Error ? error.message : 'Try again in a moment.');
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notes'] });
+    },
+  });
+  const todoDeleteMutation = useMutation({
+    mutationFn: deleteNote,
+    onMutate: async ({ id }) => {
+      await queryClient.cancelQueries({ queryKey: ['notes', noteKind, user?.id] });
+      const previousNotes = queryClient.getQueryData<Note[]>(['notes', noteKind, user?.id]);
+
+      queryClient.setQueryData<Note[]>(['notes', noteKind, user?.id], (currentNotes) =>
+        currentNotes?.filter((note) => note.id !== id) ?? [],
+      );
+
+      return { previousNotes };
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousNotes) {
+        queryClient.setQueryData(['notes', noteKind, user?.id], context.previousNotes);
+      }
+
+      Alert.alert('Could not clear todo', error instanceof Error ? error.message : 'Try again in a moment.');
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notes'] });
+    },
+  });
 
   const screenSidePadding = Spacing.three;
   const gridSidePadding = isLibrary ? Spacing.two : screenSidePadding;
@@ -898,7 +996,8 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
   const noteColumnCount = isLibrary ? Math.max(2, columnCount) : columnCount;
   const tileWidth = (noteGridWidth - gap * (noteColumnCount - 1)) / noteColumnCount;
   const allBoardsPage = { id: null, title: 'All', color: '#243b37' };
-  const boardPages = isLibrary ? [allBoardsPage, ...boards].reverse() : [allBoardsPage, ...boards];
+  const laterBoardsPage = { id: 'later', title: 'Later', color: '#2f3439' };
+  const boardPages = isLibrary ? [allBoardsPage, ...boards].reverse() : [allBoardsPage, laterBoardsPage, ...boards];
   const selectedBoardIndex = Math.max(
     0,
     boardPages.findIndex((board) => board.id === selectedBoardId),
@@ -908,6 +1007,9 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
     .filter((note) => note.kind === noteKind)
     .map((note) => (isLibrary && note.id in doneOverrides ? { ...note, done: doneOverrides[note.id] } : note));
   const categories = isLibrary ? getLibraryCategories(notes, customLibraryCategoryIds) : getTodoCategories(notes, customTodoCategoryIds, hiddenTodoCategoryIds, todoCategoryLabels);
+  const activeTodoBoardPickerNote = activeTodoBoardPickerNoteId
+    ? notes.find((note) => note.id === activeTodoBoardPickerNoteId) ?? null
+    : null;
   const selectedCategoryPath = selectedCategoryId ? selectedCategoryId.split('/').map((_part, index, parts) => parts.slice(0, index + 1).join('/')) : [];
   const categoryRowParents = isLibrary ? [null] : [null, ...selectedCategoryPath];
   const contentBottomPadding = Spacing.three;
@@ -964,11 +1066,60 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
 
   function getNotesForBoard(boardId: string | null) {
     const filteredNotes = notes.filter((note) => {
-      const matchesBoard = isLibrary ? isNoteInLibraryBoard(note, boardId, libraryClock, libraryDayStartHour) : !boardId || note.boardIds.includes(boardId);
+      const matchesBoard = isLibrary
+        ? isNoteInLibraryBoard(note, boardId, libraryClock, libraryDayStartHour)
+        : boardId === 'later'
+          ? !note.boardIds.length
+          : !boardId || note.boardIds.includes(boardId);
       const matchesCategory = doesCategoryMatchFilter(note.categoryIds, selectedCategoryId);
 
       return matchesBoard && matchesCategory;
     });
+
+    if (!isLibrary) {
+      const groupedNotes = new Map<string, Note[]>();
+
+      for (const note of filteredNotes) {
+        const groupKey = getCompoundGroupKey(note);
+        const group = groupedNotes.get(groupKey) ?? [];
+        group.push(note);
+        groupedNotes.set(groupKey, group);
+      }
+
+      const visibleTodos = [...groupedNotes.values()].map((groupNotes) => {
+        const orderedGroupNotes = [...groupNotes].sort((firstNote, secondNote) => {
+          const firstPosition = firstNote.compound?.compoundPosition ?? 0;
+          const secondPosition = secondNote.compound?.compoundPosition ?? 0;
+
+          return firstPosition - secondPosition || firstNote.position - secondNote.position;
+        });
+
+        const visibleNote = orderedGroupNotes.find((note) => !note.done) ?? orderedGroupNotes[orderedGroupNotes.length - 1];
+
+        return {
+          visibleNote,
+          anchorPosition: getCompoundAnchorPosition(orderedGroupNotes),
+        };
+      });
+
+      if (boardId === 'today') {
+        return [...visibleTodos]
+          .sort((firstItem, secondItem) => firstItem.anchorPosition - secondItem.anchorPosition)
+          .map((item) => item.visibleNote);
+      }
+
+      if (boardId) {
+        return visibleTodos.map((item) => item.visibleNote);
+      }
+
+      return [...visibleTodos]
+        .sort((firstItem, secondItem) => {
+          const priorityDifference = getBoardPriority(firstItem.visibleNote) - getBoardPriority(secondItem.visibleNote);
+
+          return priorityDifference || secondItem.anchorPosition - firstItem.anchorPosition;
+        })
+        .map((item) => item.visibleNote);
+    }
 
     if (boardId === 'today') {
       return [...filteredNotes].sort((firstNote, secondNote) => firstNote.position - secondNote.position);
@@ -1244,7 +1395,7 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
   }
 
   function cycleBoard() {
-    if (!selectedBoardId) {
+    if (!selectedBoardId || selectedBoardId === 'later') {
       goToBoardIndex(boardPages.findIndex((board) => board.id === boards[0]?.id));
       return;
     }
@@ -1260,6 +1411,10 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
 
   function showAllBoards() {
     if (!selectedBoardId) {
+      goToBoardIndex(boardPages.findIndex((board) => board.id === 'later'));
+      return;
+    }
+    if (selectedBoardId === 'later') {
       goToBoardIndex(boardPages.findIndex((board) => board.id === boards[0]?.id));
       return;
     }
@@ -1318,6 +1473,56 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
     }
 
     moveBoardMutation.mutate({ note, boardId: targetBoard.id });
+  }
+
+  function moveNoteToBoard(note: Note, boardId: string | null) {
+    setActiveTodoBoardPickerNoteId(null);
+
+    if (!user) {
+      Alert.alert('Sign in required', 'Sign in from Account before moving synced notes.');
+      return;
+    }
+
+    if (moveBoardMutation.isPending) {
+      return;
+    }
+
+    const targetBoardId = boardId ?? '';
+    const notesToMove = getCompoundNotes(note);
+
+    queryClient.setQueryData<Note[]>(['notes', noteKind, user?.id], (currentNotes) =>
+      currentNotes?.map((currentNote) =>
+        notesToMove.some((compoundNote) => compoundNote.id === currentNote.id)
+          ? { ...currentNote, boardIds: targetBoardId ? [targetBoardId] : [] }
+          : currentNote,
+      ) ?? [],
+    );
+
+    Promise.all(
+      notesToMove.map((compoundNote) =>
+        updateNote({
+          kind: noteKind,
+          id: compoundNote.id,
+          title: compoundNote.title,
+          body: compoundNote.body,
+          done: compoundNote.done ?? false,
+          compound: compoundNote.compound ?? null,
+          boardIds: targetBoardId ? [targetBoardId] : [],
+          categoryIds: compoundNote.categoryIds.slice(0, 1),
+        }),
+      ),
+    )
+      .then(async () => {
+        await queryClient.invalidateQueries({ queryKey: ['notes'] });
+      })
+      .catch((error) => {
+        Alert.alert('Could not move note', error instanceof Error ? error.message : 'Try again in a moment.');
+        queryClient.invalidateQueries({ queryKey: ['notes'] }).catch(() => undefined);
+      });
+  }
+
+  function openTodoBoardPicker(note: Note) {
+    setActiveTodoBoardPickerNoteId(note.id);
   }
 
   async function copyLibraryNote(note: Note) {
@@ -1396,6 +1601,56 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
       return nextOverrides;
     });
     doneMutation.mutate({ id: note.id, done: nextDone });
+  }
+
+  function getCompoundNotes(note: Note) {
+    if (!note.compound?.compoundId) {
+      return [note];
+    }
+
+    return notes
+      .filter((item) => item.kind === 'note' && item.compound?.compoundId === note.compound?.compoundId)
+      .sort((firstNote, secondNote) => {
+        const firstPosition = firstNote.compound?.compoundPosition ?? 0;
+        const secondPosition = secondNote.compound?.compoundPosition ?? 0;
+
+        return firstPosition - secondPosition || firstNote.position - secondNote.position;
+      });
+  }
+
+  function advanceTodoStep(note: Note) {
+    if (!user) {
+      Alert.alert('Sign in required', 'Sign in from Account before updating synced todos.');
+      return;
+    }
+
+    if (todoProgressMutation.isPending || note.done) {
+      return;
+    }
+
+    todoProgressMutation.mutate({
+      kind: 'note',
+      id: note.id,
+      title: note.title,
+      body: note.body,
+      done: true,
+      compound: note.compound ?? null,
+      boardIds: note.boardIds,
+      categoryIds: note.categoryIds.slice(0, 1),
+    });
+  }
+
+  function clearFinishedTodo(note: Note) {
+    if (!user) {
+      Alert.alert('Sign in required', 'Sign in from Account before clearing synced todos.');
+      return;
+    }
+
+    if (todoDeleteMutation.isPending || !note.done) {
+      return;
+    }
+
+    todoDeleteMutation.mutate({ id: note.id });
   }
 
   return (
@@ -1477,6 +1732,7 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
                                   <NoteTile
                                     key={item.id}
                                     note={displayedItem}
+                                    compoundProgressLabel={null}
                                     width={tileWidth}
                                     active={false}
                                     itemGap={gap}
@@ -1547,9 +1803,10 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
                         saveOrder(orderIds);
                       }}
                       onRelease={() => setActiveDragPageKey(null)}
-                      renderItem={({ item, drag, isActive }: RenderItemParams<Note>) => (
+                      renderItem={({ item, isActive }: RenderItemParams<Note>) => (
                         <NoteTile
                           note={item}
+                          compoundProgressLabel={getCompoundProgressLabel(getCompoundNotes(item), item)}
                           width={tileWidth}
                           active={isActive}
                           itemGap={gap}
@@ -1562,7 +1819,9 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
                               params: { id: item.id, kind: noteKind },
                             })
                           }
-                          onLongPress={drag}
+                          onLongPress={() => openTodoBoardPicker(item)}
+                          onAdvanceTodoStep={() => advanceTodoStep(item)}
+                          onDeleteTodo={() => clearFinishedTodo(item)}
                           onMoveToPreviousBoard={() => moveNoteToAdjacentBoard(item, 'previous')}
                           onMoveToNextBoard={() => moveNoteToAdjacentBoard(item, 'next')}
                           boards={boards}
@@ -1602,6 +1861,39 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
           {...bottomBackPanResponder.panHandlers}
           style={[styles.bottomBackLayer, { bottom: bottomControlsOffset + categorySheetHeight + insets.bottom }]}
         />
+      ) : null}
+      {activeTodoBoardPickerNote && !isLibrary ? (
+        <View style={styles.todoBoardPickerOverlay} pointerEvents="box-none">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close board picker"
+            onPress={() => setActiveTodoBoardPickerNoteId(null)}
+            style={StyleSheet.absoluteFill}
+          />
+          <View
+            style={[
+              styles.todoBoardPicker,
+              { bottom: bottomControlsOffset + categorySheetHeight + insets.bottom + Spacing.six },
+            ]}>
+            {[
+              { label: 'Today', boardId: 'today' as string | null },
+              { label: 'Tomorrow', boardId: 'tomorrow' as string | null },
+              { label: 'This week', boardId: 'this-week' as string | null },
+              { label: 'Later', boardId: null },
+            ].map((option) => (
+              <Pressable
+                key={option.label}
+                accessibilityRole="button"
+                accessibilityLabel={`Move todo to ${option.label}`}
+                onPress={() => moveNoteToBoard(activeTodoBoardPickerNote, option.boardId)}
+                style={({ pressed }) => [styles.todoBoardPickerButton, pressed && styles.pressed]}>
+                <ThemedText type="smallBold" style={styles.todoBoardPickerButtonText}>
+                  {option.label}
+                </ThemedText>
+              </Pressable>
+            ))}
+          </View>
+        </View>
       ) : null}
       <Pressable
         accessibilityRole="button"
@@ -1956,6 +2248,35 @@ const styles = StyleSheet.create({
   libraryActionButtonSelected: {
     backgroundColor: '#243b37',
   },
+  todoBoardPickerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 11,
+    justifyContent: 'flex-end',
+    paddingHorizontal: Spacing.three,
+  },
+  todoBoardPicker: {
+    borderRadius: 16,
+    backgroundColor: '#17191d',
+    borderWidth: 1,
+    borderColor: '#2a2e32',
+    padding: Spacing.one,
+    gap: Spacing.half,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.28,
+    shadowRadius: 20,
+    elevation: 12,
+  },
+  todoBoardPickerButton: {
+    minHeight: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  todoBoardPickerButtonText: {
+    color: '#e5e8eb',
+  },
   boardStatusBadges: {
     minHeight: 24,
     flexDirection: 'row',
@@ -1989,6 +2310,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#1d2023',
+  },
+  todoProgressButton: {
+    backgroundColor: '#202428',
   },
   noteTitle: {
     fontSize: 17,

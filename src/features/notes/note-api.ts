@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { CompoundTodoMeta, normalizeCompoundTodoMeta } from './compound-todo';
 import { Note, NoteKind } from './types';
 
 import {
@@ -20,6 +21,7 @@ type NoteRow = {
   kind: NoteKind | null;
   title: string | null;
   body: string | null;
+  workflow?: unknown | null;
   color: string | null;
   pinned: boolean | null;
   done?: boolean | null;
@@ -34,6 +36,7 @@ export type CreateNoteInput = {
   kind?: NoteKind;
   title: string;
   body: string;
+  compound?: CompoundTodoMeta | null;
   boardIds: string[];
   categoryIds: string[];
   ownerId: string;
@@ -44,6 +47,8 @@ export type UpdateNoteInput = {
   id: string;
   title: string;
   body: string;
+  done?: boolean;
+  compound?: CompoundTodoMeta | null;
   boardIds: string[];
   categoryIds: string[];
 };
@@ -68,6 +73,14 @@ export type DeleteCategoryInput = {
 export type UpdateNoteDoneInput = {
   id: string;
   done: boolean;
+};
+
+export type CreateCompoundNotePageInput = {
+  sourceNote: Note;
+  direction: 'before' | 'after';
+  title: string;
+  body: string;
+  ownerId: string;
 };
 
 export type FetchNotesInput = {
@@ -104,6 +117,16 @@ function isMissingKindColumnError(error: unknown) {
   return Boolean(maybeError.message?.includes('kind'));
 }
 
+function isMissingWorkflowColumnError(error: unknown) {
+  if (!isMissingColumnError(error) || !error || typeof error !== 'object') {
+    return false;
+  }
+
+  const maybeError = error as { message?: string };
+
+  return Boolean(maybeError.message?.includes('workflow'));
+}
+
 function formatUpdatedAt(value: string | null) {
   if (!value) {
     return 'Today';
@@ -135,6 +158,7 @@ function mapNote(row: NoteRow): Note {
     kind: row.kind ?? 'note',
     title,
     body,
+    compound: normalizeCompoundTodoMeta(row.workflow),
     color: row.color ?? '#fff3bf',
     boardIds: row.note_boards?.map((board) => board.board_id) ?? [],
     categoryIds: row.note_categories?.map((category) => category.category_id) ?? [],
@@ -144,6 +168,50 @@ function mapNote(row: NoteRow): Note {
     createdAt: row.created_at ?? row.updated_at ?? new Date().toISOString(),
     updatedAt: formatUpdatedAt(row.updated_at),
   };
+}
+
+async function updateNoteCompoundMeta(noteId: string, compound: CompoundTodoMeta | null) {
+  const { error } = await supabase.from('notes').update({ workflow: compound }).eq('id', noteId);
+
+  if (error) {
+    if (isMissingWorkflowColumnError(error)) {
+      throw new Error('Compound todos need the latest Supabase notes.workflow migration before they can sync.');
+    }
+
+    throw error;
+  }
+}
+
+async function fetchTodoNoteRowsForCompoundSync() {
+  const result = await supabase
+    .from('notes')
+    .select('id,workflow')
+    .eq('kind', 'note')
+    .eq('archived', false)
+    .is('deleted_at', null);
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  return result.data as Pick<NoteRow, 'id' | 'workflow'>[];
+}
+
+async function shiftCompoundPositions(compoundId: string, fromPosition: number) {
+  const rows = await fetchTodoNoteRowsForCompoundSync();
+  const chainRows = rows
+    .map((row) => ({ id: row.id, compound: normalizeCompoundTodoMeta(row.workflow) }))
+    .filter((row) => row.compound?.compoundId === compoundId && row.compound.compoundPosition >= fromPosition)
+    .sort((firstRow, secondRow) => (secondRow.compound?.compoundPosition ?? 0) - (firstRow.compound?.compoundPosition ?? 0));
+
+  await Promise.all(
+    chainRows.map((row) =>
+      updateNoteCompoundMeta(row.id, {
+        compoundId,
+        compoundPosition: (row.compound?.compoundPosition ?? 0) + 1,
+      }),
+    ),
+  );
 }
 
 function addDays(date: Date, days: number) {
@@ -254,7 +322,7 @@ export async function fetchNotes() {
 export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) {
   const modernResult = await supabase
     .from('notes')
-    .select('id,kind,title,body,color,pinned,done,position,created_at,updated_at,note_boards(board_id,assigned_at),note_categories(category_id)')
+    .select('id,kind,title,body,workflow,color,pinned,done,position,created_at,updated_at,note_boards(board_id,assigned_at),note_categories(category_id)')
     .eq('kind', kind)
     .eq('archived', false)
     .is('deleted_at', null)
@@ -276,7 +344,7 @@ export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) 
 
   const noPositionResult = await supabase
     .from('notes')
-    .select('id,kind,title,body,color,pinned,done,created_at,updated_at,note_boards(board_id,assigned_at),note_categories(category_id)')
+    .select('id,kind,title,body,workflow,color,pinned,done,created_at,updated_at,note_boards(board_id,assigned_at),note_categories(category_id)')
     .eq('kind', kind)
     .eq('archived', false)
     .is('deleted_at', null)
@@ -293,7 +361,7 @@ export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) 
 
   const legacyResult = await supabase
     .from('notes')
-    .select('id,kind,title,body,color,pinned,done,created_at,updated_at,note_boards(board_id),note_categories(category_id)')
+    .select('id,kind,title,body,workflow,color,pinned,done,created_at,updated_at,note_boards(board_id),note_categories(category_id)')
     .eq('kind', kind)
     .eq('archived', false)
     .order('updated_at', { ascending: false });
@@ -310,9 +378,13 @@ export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) 
     throw legacyResult.error;
   }
 
+  if (isMissingWorkflowColumnError(legacyResult.error)) {
+    throw new Error('Compound todos need the latest Supabase notes.workflow migration before they can sync.');
+  }
+
   const legacyWithoutDoneResult = await supabase
     .from('notes')
-    .select('id,kind,title,body,color,pinned,created_at,updated_at,note_boards(board_id),note_categories(category_id)')
+    .select('id,kind,title,body,workflow,color,pinned,created_at,updated_at,note_boards(board_id),note_categories(category_id)')
     .eq('kind', kind)
     .eq('archived', false)
     .order('updated_at', { ascending: false });
@@ -322,21 +394,27 @@ export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) 
       throw new Error('Notes and Library need the Supabase notes.kind migration before they can stay separate.');
     }
 
+    if (isMissingWorkflowColumnError(legacyWithoutDoneResult.error)) {
+      throw new Error('Compound todos need the latest Supabase notes.workflow migration before they can sync.');
+    }
+
     throw legacyWithoutDoneResult.error;
   }
 
   return (legacyWithoutDoneResult.data as NoteRow[]).map(mapNote);
 }
 
-export async function createNote({ kind = 'note', title, body, boardIds, categoryIds, ownerId }: CreateNoteInput) {
+export async function createNote({ kind = 'note', title, body, compound = null, boardIds, categoryIds, ownerId }: CreateNoteInput) {
   const cleanedTitle = title.trim();
   const cleanedBody = body.trim();
+  const normalizedCompound = kind === 'note' ? normalizeCompoundTodoMeta(compound) : null;
 
   const noteInsert = {
     owner_id: ownerId,
     kind,
     title: cleanedTitle,
     body: cleanedBody,
+    workflow: normalizedCompound,
     color: '#fff3bf',
     position: Date.now(),
   };
@@ -359,6 +437,7 @@ export async function createNote({ kind = 'note', title, body, boardIds, categor
           kind,
           title: cleanedTitle,
           body: cleanedBody,
+          workflow: normalizedCompound,
           color: '#fff3bf',
         })
         .select('id,kind')
@@ -370,6 +449,10 @@ export async function createNote({ kind = 'note', title, body, boardIds, categor
   }
 
   if (legacyInsertResult.error) {
+    if (isMissingWorkflowColumnError(legacyInsertResult.error)) {
+      throw new Error('Compound todos need the latest Supabase notes.workflow migration before they can sync.');
+    }
+
     throw legacyInsertResult.error;
   }
 
@@ -421,9 +504,10 @@ export async function createNote({ kind = 'note', title, body, boardIds, categor
   return noteId;
 }
 
-export async function updateNote({ kind = 'note', id, title, body, boardIds, categoryIds }: UpdateNoteInput) {
+export async function updateNote({ kind = 'note', id, title, body, done = false, compound = null, boardIds, categoryIds }: UpdateNoteInput) {
   const cleanedTitle = title.trim();
   const cleanedBody = body.trim();
+  const normalizedCompound = kind === 'note' ? normalizeCompoundTodoMeta(compound) : null;
 
   const { error } = await supabase
     .from('notes')
@@ -431,10 +515,16 @@ export async function updateNote({ kind = 'note', id, title, body, boardIds, cat
       kind,
       title: cleanedTitle,
       body: cleanedBody,
+      done,
+      workflow: normalizedCompound,
     })
     .eq('id', id);
 
   if (error) {
+    if (isMissingWorkflowColumnError(error)) {
+      throw new Error('Compound todos need the latest Supabase notes.workflow migration before they can sync.');
+    }
+
     throw error;
   }
 
@@ -485,6 +575,47 @@ export async function updateNote({ kind = 'note', id, title, body, boardIds, cat
       throw categoryError;
     }
   }
+}
+
+export async function createCompoundNotePage({ sourceNote, direction, title, body, ownerId }: CreateCompoundNotePageInput) {
+  const sourceCompound = sourceNote.compound;
+  const compoundId = sourceCompound?.compoundId ?? `compound-${sourceNote.id}`;
+  const compoundPosition = sourceCompound
+    ? sourceCompound.compoundPosition + (direction === 'after' ? 1 : 0)
+    : direction === 'before'
+      ? 0
+      : 1;
+
+  if (!sourceCompound) {
+    await updateNote({
+      kind: 'note',
+      id: sourceNote.id,
+      title: sourceNote.title,
+      body: sourceNote.body,
+      done: sourceNote.done ?? false,
+      compound: {
+        compoundId,
+        compoundPosition: direction === 'before' ? 1 : 0,
+      },
+      boardIds: sourceNote.boardIds,
+      categoryIds: sourceNote.categoryIds.slice(0, 1),
+    });
+  } else {
+    await shiftCompoundPositions(compoundId, compoundPosition);
+  }
+
+  return createNote({
+    kind: 'note',
+    title,
+    body,
+    compound: {
+      compoundId,
+      compoundPosition,
+    },
+    boardIds: sourceNote.boardIds,
+    categoryIds: sourceNote.categoryIds.slice(0, 1),
+    ownerId,
+  });
 }
 
 export async function deleteNote({ id }: DeleteNoteInput) {

@@ -123,6 +123,7 @@ create table if not exists public.notes (
   kind text not null default 'note' check (kind in ('note', 'library')),
   title text not null default '',
   body text not null default '',
+  workflow jsonb,
   color text not null default '#fff3bf',
   pinned boolean not null default false,
   done boolean not null default false,
@@ -141,6 +142,9 @@ alter table public.notes
 
 alter table public.notes
   add column if not exists done boolean not null default false;
+
+alter table public.notes
+  add column if not exists workflow jsonb;
 
 alter table public.notes
   drop constraint if exists notes_kind_check;

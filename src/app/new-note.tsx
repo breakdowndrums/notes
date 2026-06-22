@@ -9,8 +9,8 @@ import { useEffect, useRef, useState } from 'react';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, NoteSurfaceColor, Spacing } from '@/constants/theme';
-import { createNote, fetchNotesByKind } from '@/features/notes/note-api';
-import { libraryBoards, sampleBoards, sampleCategories, sampleLibraryNotes } from '@/features/notes/sample-notes';
+import { createCompoundNotePage, createNote, fetchNotesByKind } from '@/features/notes/note-api';
+import { libraryBoards, sampleBoards, sampleCategories, sampleLibraryNotes, sampleNotes } from '@/features/notes/sample-notes';
 import type { Note, NoteKind } from '@/features/notes/types';
 import { useTheme } from '@/hooks/use-theme';
 import { useAuth } from '@/lib/auth/auth-provider';
@@ -144,6 +144,18 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   });
   const boardId = getParam(params.boardId);
   const categoryId = getParam(params.categoryId);
+  const sourceNoteId = getParam(params.sourceNoteId);
+  const sourceTitle = getParam(params.sourceTitle);
+  const sourceBody = getParam(params.sourceBody);
+  const sourceDone = getParam(params.sourceDone) === '1';
+  const sourceBoardId = getParam(params.sourceBoardId);
+  const sourceCategoryId = getParam(params.sourceCategoryId);
+  const sourceCompoundId = getParam(params.sourceCompoundId);
+  const sourceCompoundPosition = Number(getParam(params.sourceCompoundPosition));
+  const rawCompoundInsertDirection = getParam(params.compoundInsertDirection);
+  const compoundInsertDirection = rawCompoundInsertDirection === 'before' || rawCompoundInsertDirection === 'after'
+    ? rawCompoundInsertDirection
+    : null;
   const boards = noteKind === 'library' ? libraryBoards : sampleBoards;
   const [libraryCategoryIds, setLibraryCategoryIds] = useState<string[]>(categoryId ? [categoryId] : []);
   const [todoCategoryIds, setTodoCategoryIds] = useState<string[]>([]);
@@ -168,6 +180,36 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   const todoCategoryDrawerParents = [null, ...(categoryNavigationId ? [categoryNavigationId] : [])];
   const categoryDrawerParents = noteKind === 'note' ? todoCategoryDrawerParents : [null];
   const todoCategoryDrawerIndex = isTodoCategorySheetOpen ? (noteKind === 'note' && categoryNavigationId ? 2 : 1) : 0;
+  const todoNotesQuery = useQuery({
+    queryKey: ['notes', 'note', user?.id],
+    queryFn: () => fetchNotesByKind({ kind: 'note' }),
+    enabled: noteKind === 'note' && isSupabaseConfigured && Boolean(user),
+  });
+  const sourceNoteFallback = sourceNoteId
+    ? {
+        id: sourceNoteId,
+        kind: 'note' as const,
+        title: sourceTitle,
+        body: sourceBody,
+        color: '#fff3bf',
+        boardIds: sourceBoardId ? [sourceBoardId] : boardId ? [boardId] : ['today'],
+        categoryIds: sourceCategoryId ? [sourceCategoryId] : categoryId ? [categoryId] : [],
+        pinned: false,
+        done: sourceDone,
+        compound: sourceCompoundId && Number.isFinite(sourceCompoundPosition)
+          ? {
+              compoundId: sourceCompoundId,
+              compoundPosition: sourceCompoundPosition,
+            }
+          : null,
+        position: Date.now(),
+        createdAt: new Date().toISOString(),
+        updatedAt: 'Today',
+      }
+    : undefined;
+  const sourceNote = noteKind === 'note'
+    ? (user ? todoNotesQuery.data ?? [] : sampleNotes).find((note) => note.id === sourceNoteId) ?? sourceNoteFallback
+    : undefined;
 
   useEffect(() => {
     const focusTimer = setTimeout(() => {
@@ -207,14 +249,22 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
 
   const saveMutation = useMutation({
     mutationFn: () =>
-      createNote({
-        kind: noteKind,
-        title,
-        body,
-        boardIds: noteKind === 'library' ? [] : [boardId || 'today'],
-        categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
-        ownerId: user?.id ?? '',
-      }),
+      sourceNote && compoundInsertDirection
+        ? createCompoundNotePage({
+            sourceNote,
+            direction: compoundInsertDirection,
+            title,
+            body,
+            ownerId: user?.id ?? '',
+          })
+        : createNote({
+            kind: noteKind,
+            title,
+            body,
+            boardIds: noteKind === 'library' ? [] : [boardId || 'today'],
+            categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
+            ownerId: user?.id ?? '',
+          }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['notes'] });
       router.replace(returnPath as never);
@@ -227,6 +277,11 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   function saveNote() {
     if (!isSupabaseConfigured || !user) {
       Alert.alert('Sign in required', 'Sign in from Account before saving synced notes.');
+      return;
+    }
+
+    if (compoundInsertDirection && !sourceNote) {
+      Alert.alert('Could not load linked todo', 'Open the source todo again and try adding the new page once more.');
       return;
     }
 
