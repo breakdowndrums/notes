@@ -163,6 +163,8 @@ export default function NoteDetailScreen() {
   const params = useLocalSearchParams();
   const noteId = getParam(params.id);
   const initialNoteKind: NoteKind = getParam(params.kind) === 'library' ? 'library' : 'note';
+  const returnBoardId = getParam(params.returnBoardId);
+  const returnCategoryId = getParam(params.returnCategoryId);
   const [noteKind, setNoteKind] = useState<NoteKind>(initialNoteKind);
   const boards = noteKind === 'library' ? libraryBoards : sampleBoards;
   const returnPath = noteKind === 'library' ? '/library' : '/';
@@ -287,6 +289,23 @@ export default function NoteDetailScreen() {
         categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
     };
   }
+
+  function getReturnRoute() {
+    const routeParams: Record<string, string> = {};
+
+    if (returnBoardId) {
+      routeParams.boardId = returnBoardId;
+    }
+
+    if (returnCategoryId) {
+      routeParams.categoryId = returnCategoryId;
+    }
+
+    return Object.keys(routeParams).length
+      ? { pathname: returnPath, params: routeParams }
+      : returnPath;
+  }
+
   const deleteMutation = useMutation({
     mutationFn: () => deleteNote({ id: noteId }),
     onSuccess: async () => {
@@ -295,7 +314,7 @@ export default function NoteDetailScreen() {
         currentNotes?.filter((currentNote) => currentNote.id !== noteId) ?? [],
       );
       await queryClient.invalidateQueries({ queryKey: ['notes'] });
-      router.replace(returnPath as never);
+      router.replace(getReturnRoute() as never);
     },
     onError: (error) => {
       Alert.alert('Could not delete note', error instanceof Error ? error.message : 'Try again in a moment.');
@@ -439,7 +458,7 @@ export default function NoteDetailScreen() {
 
   function goBack() {
     if ((!note && loadedNoteId !== noteId) || !user) {
-      router.replace(returnPath as never);
+      router.replace(getReturnRoute() as never);
       return;
     }
 
@@ -454,7 +473,7 @@ export default function NoteDetailScreen() {
       persistNote();
     }
 
-    router.replace(returnPath as never);
+    router.replace(getReturnRoute() as never);
   }
 
   useEffect(() => {

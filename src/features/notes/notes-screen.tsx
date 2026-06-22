@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as Clipboard from 'expo-clipboard';
 import * as WebBrowser from 'expo-web-browser';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import Svg, { Path } from 'react-native-svg';
 import {
   Alert,
@@ -95,6 +95,24 @@ function getLibraryDoneStorageKey(userId?: string) {
 
 function getTodoCategoryStorageKey(userId?: string) {
   return `${TodoCategoryStorageKeyPrefix}:${userId ?? 'local'}`;
+}
+
+function getParam(value: string | string[] | undefined) {
+  if (Array.isArray(value)) {
+    return value[0] ?? '';
+  }
+
+  return value ?? '';
+}
+
+function getBoardParam(value: string | string[] | undefined) {
+  const boardId = getParam(value);
+
+  return boardId === 'all' || !boardId ? null : boardId;
+}
+
+function getInitialBoardId(value: string | string[] | undefined) {
+  return value === undefined ? 'today' : getBoardParam(value);
 }
 
 function SettingsIcon({ color = '#000000', size = 23 }: { color?: string; size?: number }) {
@@ -618,8 +636,9 @@ type NotesScreenProps = {
 export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
   const isLibrary = noteKind === 'library';
   const boards = isLibrary ? libraryBoards : sampleBoards;
-  const [selectedBoardId, setSelectedBoardId] = useState<string | null>('today');
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  const params = useLocalSearchParams();
+  const [selectedBoardId, setSelectedBoardId] = useState<string | null>(() => getInitialBoardId(params.boardId));
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(() => getParam(params.categoryId) || null);
   const [customTodoCategoryIds, setCustomTodoCategoryIds] = useState<string[]>([]);
   const [hiddenTodoCategoryIds, setHiddenTodoCategoryIds] = useState<string[]>([]);
   const [todoCategoryLabels, setTodoCategoryLabels] = useState<Record<string, string>>({});
@@ -651,6 +670,22 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
     queryFn: () => fetchNotesByKind({ kind: noteKind }),
     enabled: isSupabaseConfigured && Boolean(user),
   });
+
+  useEffect(() => {
+    if (params.boardId === undefined) {
+      return;
+    }
+
+    setSelectedBoardId(getBoardParam(params.boardId));
+  }, [params.boardId]);
+
+  useEffect(() => {
+    if (params.categoryId === undefined) {
+      return;
+    }
+
+    setSelectedCategoryId(getParam(params.categoryId) || null);
+  }, [params.categoryId]);
 
   useEffect(() => {
     AsyncStorage.setItem(LastSectionStorageKey, noteKind).catch(() => undefined);
@@ -1018,6 +1053,15 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
   const categorySheetHeight = CategorySheetRowHeight;
   const bottomControlsOffset = isEditingCategoryLabel ? keyboardHeight : 0;
   const shouldShowBottomBackLayer = isCategorySheetExpanded;
+
+  useEffect(() => {
+    const scrollX = selectedBoardIndex * availableWidth;
+    const frame = requestAnimationFrame(() => {
+      boardPagerRef.current?.scrollTo({ x: scrollX, y: 0, animated: false });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [availableWidth, selectedBoardIndex]);
 
   useEffect(() => {
     Animated.spring(categorySheetProgress, {
@@ -1742,7 +1786,12 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
                                     onPress={() =>
                                       router.push({
                                         pathname: '/note/[id]',
-                                        params: { id: item.id, kind: noteKind },
+                                        params: {
+                                          id: item.id,
+                                          kind: noteKind,
+                                          returnBoardId: selectedBoardId ?? 'all',
+                                          returnCategoryId: selectedCategoryId ?? '',
+                                        },
                                       })
                                     }
                                     onLongPress={() => setActiveActionNoteId((current) => (current === item.id ? null : item.id))}
@@ -1816,7 +1865,12 @@ export default function NotesScreen({ noteKind = 'note' }: NotesScreenProps) {
                           onPress={() =>
                             router.push({
                               pathname: '/note/[id]',
-                              params: { id: item.id, kind: noteKind },
+                              params: {
+                                id: item.id,
+                                kind: noteKind,
+                                returnBoardId: selectedBoardId ?? 'all',
+                                returnCategoryId: selectedCategoryId ?? '',
+                              },
                             })
                           }
                           onLongPress={() => openTodoBoardPicker(item)}
