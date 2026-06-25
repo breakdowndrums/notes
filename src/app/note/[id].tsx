@@ -9,7 +9,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, NoteSurfaceColor, Spacing } from '@/constants/theme';
-import { createCompoundNotePage, deleteNote, fetchNotesByKind, updateNote } from '@/features/notes/note-api';
+import { createCompoundNotePage, deleteNote, fetchNotesByKind, updateNote, updateNoteContent } from '@/features/notes/note-api';
 import {
   libraryBoards,
   sampleBoards,
@@ -34,12 +34,52 @@ const defaultCategoryTone = { backgroundColor: '#25282b', textColor: '#c8ced3' }
 const TodoCategoryStorageKeyPrefix = 'notes:todo-categories';
 const CategoryKeyboardLift = 56;
 const CategorySheetRowHeight = 48;
+const NoteDraftStorageKeyPrefix = 'notes:editor-draft';
+const AutoSaveDelay = 1000;
 
 type StoredTodoCategories = {
   customCategoryIds: string[];
   hiddenCategoryIds: string[];
   categoryLabels: Record<string, string>;
 };
+
+type EditorSnapshot = {
+  kind: NoteKind;
+  title: string;
+  body: string;
+  boardIds: string[];
+  categoryId: string | null;
+};
+
+type StoredEditorDraft = EditorSnapshot & {
+  noteId: string;
+  userId: string;
+  savedAt: number;
+};
+
+type AutoSaveStatus = 'saved' | 'local' | 'saving';
+
+function getNoteDraftStorageKey(noteId: string, userId: string) {
+  return `${NoteDraftStorageKeyPrefix}:${userId}:${noteId}`;
+}
+
+function snapshotsMatch(first: EditorSnapshot, second: EditorSnapshot) {
+  return (
+    first.kind === second.kind &&
+    first.title === second.title &&
+    first.body === second.body &&
+    first.categoryId === second.categoryId &&
+    first.boardIds.join('|') === second.boardIds.join('|')
+  );
+}
+
+function snapshotMetadataMatches(first: EditorSnapshot, second: EditorSnapshot) {
+  return (
+    first.kind === second.kind &&
+    first.categoryId === second.categoryId &&
+    first.boardIds.join('|') === second.boardIds.join('|')
+  );
+}
 
 function getTodoCategoryStorageKey(userId?: string) {
   return `${TodoCategoryStorageKeyPrefix}:${userId ?? 'local'}`;
@@ -206,6 +246,16 @@ export default function NoteDetailScreen() {
   const [savedBoardIds, setSavedBoardIds] = useState<string[]>([]);
   const [savedCategoryId, setSavedCategoryId] = useState<string | null>(null);
   const [savedKind, setSavedKind] = useState<NoteKind>(initialNoteKind);
+  const [hasHydratedDraft, setHasHydratedDraft] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('saved');
+  const [isDiscardingChanges, setIsDiscardingChanges] = useState(false);
+  const openingSnapshotRef = useRef<EditorSnapshot | null>(null);
+  const noteAtOpenRef = useRef<Note | null>(null);
+  const serverSnapshotRef = useRef<EditorSnapshot | null>(null);
+  const latestSnapshotRef = useRef<EditorSnapshot | null>(null);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const draftKey = user?.id ? getNoteDraftStorageKey(noteId, user.id) : null;
   const selectedBoards = boards.filter((board) => selectedBoardIds.includes(board.id));
   const allTodoCategories = noteKind === 'note' ? getTodoCategories(notes, todoCategoryIds) : [];
   const allLibraryCategoryIds = noteKind === 'library' ? getLibraryCategoryIds(notes, libraryCategoryIds) : [];
@@ -257,6 +307,14 @@ export default function NoteDetailScreen() {
       return { previousNotes, queryKey };
     },
     onSuccess: async (_result, input) => {
+      const savedSnapshot: EditorSnapshot = {
+        kind: input.kind,
+        title: input.title,
+        body: input.body,
+        boardIds: input.kind === 'library' ? [] : input.boardIds,
+        categoryId: input.categoryIds[0] ?? null,
+      };
+      serverSnapshotRef.current = savedSnapshot;
       setSavedTitle(input.title);
       setSavedBody(input.body);
       setSavedBoardIds(input.kind === 'library' ? [] : input.boardIds);
@@ -264,6 +322,10 @@ export default function NoteDetailScreen() {
       setSavedKind(input.kind);
       setIsEditing(false);
       setFocusedField(null);
+      setAutoSaveStatus('saved');
+      if (draftKey) {
+        await AsyncStorage.removeItem(draftKey);
+      }
     },
     onError: (error, _input, context) => {
       if (context?.previousNotes) {
@@ -309,6 +371,9 @@ export default function NoteDetailScreen() {
   const deleteMutation = useMutation({
     mutationFn: () => deleteNote({ id: noteId }),
     onSuccess: async () => {
+      if (draftKey) {
+        await AsyncStorage.removeItem(draftKey);
+      }
       await queryClient.cancelQueries({ queryKey: ['notes', noteKind, user?.id] });
       queryClient.setQueryData<Note[]>(['notes', noteKind, user?.id], (currentNotes) =>
         currentNotes?.filter((currentNote) => currentNote.id !== noteId) ?? [],
@@ -348,20 +413,197 @@ export default function NoteDetailScreen() {
 
   useEffect(() => {
     if (note && loadedNoteId !== note.id) {
-      setTitle(note.title);
-      setBody(note.body);
-      setSelectedBoardIds(noteKind === 'library' ? [] : note.boardIds);
-      setSelectedCategoryId(note.categoryIds[0] ?? null);
+      const initialSnapshot: EditorSnapshot = {
+        kind: noteKind,
+        title: note.title,
+        body: note.body,
+        boardIds: noteKind === 'library' ? [] : note.boardIds,
+        categoryId: note.categoryIds[0] ?? null,
+      };
+      openingSnapshotRef.current = initialSnapshot;
+      noteAtOpenRef.current = note;
+      serverSnapshotRef.current = initialSnapshot;
+      latestSnapshotRef.current = initialSnapshot;
+      setTitle(initialSnapshot.title);
+      setBody(initialSnapshot.body);
+      setSelectedBoardIds(initialSnapshot.boardIds);
+      setSelectedCategoryId(initialSnapshot.categoryId);
       setCategoryNavigationId(noteKind === 'note' ? getParentCategoryId(note.categoryIds[0] ?? null) : null);
       setLibraryCategoryIds(noteKind === 'library' ? note.categoryIds.filter(Boolean) : []);
-      setSavedTitle(note.title);
-      setSavedBody(note.body);
-      setSavedBoardIds(noteKind === 'library' ? [] : note.boardIds);
-      setSavedCategoryId(note.categoryIds[0] ?? null);
+      setSavedTitle(initialSnapshot.title);
+      setSavedBody(initialSnapshot.body);
+      setSavedBoardIds(initialSnapshot.boardIds);
+      setSavedCategoryId(initialSnapshot.categoryId);
       setSavedKind(noteKind);
       setLoadedNoteId(note.id);
+      setHasHydratedDraft(false);
+      setAutoSaveStatus('saved');
+
+      if (!draftKey || !user?.id) {
+        setHasHydratedDraft(true);
+        return;
+      }
+
+      let cancelled = false;
+      AsyncStorage.getItem(draftKey)
+        .then((storedDraft) => {
+          if (cancelled || !storedDraft) {
+            return;
+          }
+
+          try {
+            const draft = JSON.parse(storedDraft) as StoredEditorDraft;
+            if (draft.noteId !== note.id || draft.userId !== user.id) {
+              return;
+            }
+
+            const draftSnapshot: EditorSnapshot = {
+              kind: draft.kind === 'library' ? 'library' : 'note',
+              title: draft.title ?? '',
+              body: draft.body ?? '',
+              boardIds: Array.isArray(draft.boardIds) ? draft.boardIds : [],
+              categoryId: draft.categoryId ?? null,
+            };
+
+            if (snapshotsMatch(draftSnapshot, initialSnapshot)) {
+              AsyncStorage.removeItem(draftKey).catch(() => undefined);
+              return;
+            }
+
+            setNoteKind(draftSnapshot.kind);
+            setTitle(draftSnapshot.title);
+            setBody(draftSnapshot.body);
+            setSelectedBoardIds(draftSnapshot.kind === 'library' ? [] : draftSnapshot.boardIds);
+            setSelectedCategoryId(draftSnapshot.categoryId);
+            setCategoryNavigationId(draftSnapshot.kind === 'note' ? getParentCategoryId(draftSnapshot.categoryId) : null);
+            setAutoSaveStatus('local');
+          } catch {
+            AsyncStorage.removeItem(draftKey).catch(() => undefined);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setHasHydratedDraft(true);
+          }
+        });
+
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [loadedNoteId, note, noteKind]);
+  }, [draftKey, loadedNoteId, note, noteKind, user?.id]);
+
+  useEffect(() => {
+    const currentSnapshot: EditorSnapshot = {
+      kind: noteKind,
+      title,
+      body,
+      boardIds: noteKind === 'library' ? [] : selectedBoardIds,
+      categoryId: selectedCategoryId,
+    };
+    latestSnapshotRef.current = currentSnapshot;
+
+    if (!hasHydratedDraft || !draftKey || !user || !note || isDiscardingChanges) {
+      return;
+    }
+
+    const serverSnapshot = serverSnapshotRef.current;
+    if (serverSnapshot && snapshotsMatch(currentSnapshot, serverSnapshot)) {
+      setAutoSaveStatus('saved');
+      AsyncStorage.removeItem(draftKey).catch(() => undefined);
+      return;
+    }
+
+    const storedDraft: StoredEditorDraft = {
+      ...currentSnapshot,
+      noteId,
+      userId: user.id,
+      savedAt: Date.now(),
+    };
+    setAutoSaveStatus((current) => (current === 'saving' ? current : 'local'));
+    AsyncStorage.setItem(draftKey, JSON.stringify(storedDraft)).catch(() => undefined);
+
+    if (!canSave) {
+      return;
+    }
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    autoSaveTimerRef.current = setTimeout(() => {
+      const snapshotToSave = latestSnapshotRef.current;
+      if (!snapshotToSave) {
+        return;
+      }
+
+      autoSaveQueueRef.current = autoSaveQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          setAutoSaveStatus('saving');
+          const previousServerSnapshot = serverSnapshotRef.current;
+
+          if (previousServerSnapshot && snapshotMetadataMatches(snapshotToSave, previousServerSnapshot)) {
+            await updateNoteContent({
+              id: noteId,
+              title: snapshotToSave.title,
+              body: snapshotToSave.body,
+            });
+          } else {
+            await updateNote({
+              kind: snapshotToSave.kind,
+              id: noteId,
+              title: snapshotToSave.title,
+              body: snapshotToSave.body,
+              done: note.done ?? false,
+              compound: snapshotToSave.kind === 'note' ? note.compound ?? null : null,
+              boardIds: snapshotToSave.kind === 'library' ? [] : snapshotToSave.boardIds,
+              categoryIds: snapshotToSave.categoryId ? [snapshotToSave.categoryId] : [],
+            });
+          }
+
+          serverSnapshotRef.current = snapshotToSave;
+          setSavedTitle(snapshotToSave.title);
+          setSavedBody(snapshotToSave.body);
+          setSavedBoardIds(snapshotToSave.boardIds);
+          setSavedCategoryId(snapshotToSave.categoryId);
+          setSavedKind(snapshotToSave.kind);
+
+          if (latestSnapshotRef.current && snapshotsMatch(latestSnapshotRef.current, snapshotToSave)) {
+            await AsyncStorage.removeItem(draftKey);
+            setAutoSaveStatus('saved');
+          } else {
+            setAutoSaveStatus('local');
+          }
+
+          queryClient.invalidateQueries({ queryKey: ['notes'] }).catch(() => undefined);
+        })
+        .catch(() => {
+          setAutoSaveStatus('local');
+        });
+    }, AutoSaveDelay);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    body,
+    canSave,
+    draftKey,
+    hasHydratedDraft,
+    isDiscardingChanges,
+    note,
+    noteId,
+    noteKind,
+    queryClient,
+    selectedBoardIds,
+    selectedCategoryId,
+    title,
+    user,
+  ]);
 
   useEffect(() => {
     if (noteKind !== 'note') {
@@ -474,6 +716,79 @@ export default function NoteDetailScreen() {
     }
 
     router.replace(getReturnRoute() as never);
+  }
+
+  async function discardChanges() {
+    const openingSnapshot = openingSnapshotRef.current;
+    const originalNote = noteAtOpenRef.current;
+
+    if (!openingSnapshot || !originalNote || !draftKey || isDiscardingChanges) {
+      return;
+    }
+
+    setIsDiscardingChanges(true);
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    try {
+      await autoSaveQueueRef.current.catch(() => undefined);
+      await updateNote({
+        kind: openingSnapshot.kind,
+        id: noteId,
+        title: openingSnapshot.title,
+        body: openingSnapshot.body,
+        done: originalNote.done ?? false,
+        compound: openingSnapshot.kind === 'note' ? originalNote.compound ?? null : null,
+        boardIds: openingSnapshot.kind === 'library' ? [] : openingSnapshot.boardIds,
+        categoryIds: openingSnapshot.categoryId ? [openingSnapshot.categoryId] : [],
+      });
+
+      serverSnapshotRef.current = openingSnapshot;
+      latestSnapshotRef.current = openingSnapshot;
+      setNoteKind(openingSnapshot.kind);
+      setTitle(openingSnapshot.title);
+      setBody(openingSnapshot.body);
+      setSelectedBoardIds(openingSnapshot.boardIds);
+      setSelectedCategoryId(openingSnapshot.categoryId);
+      setCategoryNavigationId(openingSnapshot.kind === 'note' ? getParentCategoryId(openingSnapshot.categoryId) : null);
+      setSavedTitle(openingSnapshot.title);
+      setSavedBody(openingSnapshot.body);
+      setSavedBoardIds(openingSnapshot.boardIds);
+      setSavedCategoryId(openingSnapshot.categoryId);
+      setSavedKind(openingSnapshot.kind);
+      setAutoSaveStatus('saved');
+      await AsyncStorage.removeItem(draftKey);
+      await queryClient.invalidateQueries({ queryKey: ['notes'] });
+    } catch (error) {
+      setAutoSaveStatus('local');
+      Alert.alert('Could not discard changes', error instanceof Error ? error.message : 'Try again in a moment.');
+    } finally {
+      setIsDiscardingChanges(false);
+    }
+  }
+
+  function confirmDiscardChanges() {
+    const openingSnapshot = openingSnapshotRef.current;
+    const currentSnapshot = latestSnapshotRef.current;
+    if (!openingSnapshot || !currentSnapshot || snapshotsMatch(openingSnapshot, currentSnapshot)) {
+      return;
+    }
+
+    const message = 'Restore the note to how it was when you opened it? The latest changes will be removed.';
+    if (Platform.OS === 'web') {
+      const confirmed = typeof window === 'undefined' || window.confirm(message);
+      if (confirmed) {
+        discardChanges();
+      }
+      return;
+    }
+
+    Alert.alert('Discard latest changes?', message, [
+      { text: 'Keep changes', style: 'cancel' },
+      { text: 'Discard', style: 'destructive', onPress: discardChanges },
+    ]);
   }
 
   useEffect(() => {
@@ -811,6 +1126,18 @@ export default function NoteDetailScreen() {
   const todoCategoryDrawerParents = [null, ...(categoryNavigationId ? [categoryNavigationId] : [])];
   const categoryDrawerParents = noteKind === 'note' ? todoCategoryDrawerParents : [null];
   const categoryDrawerIndex = isCategorySheetOpen ? (noteKind === 'note' && categoryNavigationId ? 2 : 1) : 0;
+  const openingSnapshot = openingSnapshotRef.current;
+  const currentSnapshot = latestSnapshotRef.current;
+  const canDiscardChanges = Boolean(
+    openingSnapshot &&
+    currentSnapshot &&
+    !snapshotsMatch(openingSnapshot, currentSnapshot),
+  );
+  const saveStatusLabel = autoSaveStatus === 'saving'
+    ? 'Saving...'
+    : autoSaveStatus === 'local'
+      ? 'Saved locally'
+      : 'Saved';
 
   useEffect(() => {
     Animated.timing(categorySheetProgress, {
@@ -842,13 +1169,25 @@ export default function NoteDetailScreen() {
               </Pressable>
             ) : null}
             <View style={styles.headerSpacer}>
-              {noteKind === 'note' && compoundNotes.length > 1 ? (
-                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
-                  {currentCompoundIndex + 1} of {compoundNotes.length}
-                </ThemedText>
-              ) : null}
+              <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+                {noteKind === 'note' && compoundNotes.length > 1
+                  ? `${currentCompoundIndex + 1} of ${compoundNotes.length} · ${saveStatusLabel}`
+                  : saveStatusLabel}
+              </ThemedText>
             </View>
             <View style={styles.headerActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Discard changes since opening note"
+                disabled={!canDiscardChanges || isDiscardingChanges}
+                onPress={confirmDiscardChanges}
+                style={({ pressed }) => [
+                  styles.plainIconButton,
+                  (!canDiscardChanges || isDiscardingChanges) && styles.disabled,
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name="arrow-undo-outline" size={20} color={theme.text} />
+              </Pressable>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Delete note"

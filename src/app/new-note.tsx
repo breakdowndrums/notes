@@ -18,6 +18,7 @@ import { useAuth } from '@/lib/auth/auth-provider';
 const CategoryKeyboardLift = 56;
 const CategorySheetRowHeight = 48;
 const TodoCategoryStorageKeyPrefix = 'notes:todo-categories';
+const NewNoteDraftStorageKeyPrefix = 'notes:new-editor-draft';
 const categoryToneById: Record<string, { backgroundColor: string; textColor: string }> = {
   coding: { backgroundColor: '#123023', textColor: '#9bd7aa' },
   writing: { backgroundColor: '#142840', textColor: '#9dc7f4' },
@@ -29,6 +30,16 @@ type StoredTodoCategories = {
   customCategoryIds: string[];
   hiddenCategoryIds: string[];
   categoryLabels: Record<string, string>;
+};
+
+type StoredNewNoteDraft = {
+  title: string;
+  body: string;
+  noteKind: NoteKind;
+  selectedCategoryId: string | null;
+  categoryNavigationId: string | null;
+  libraryCategoryIds: string[];
+  savedAt: number;
 };
 
 function getTodoCategoryStorageKey(userId?: string) {
@@ -210,6 +221,11 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   const sourceNote = noteKind === 'note'
     ? (user ? todoNotesQuery.data ?? [] : sampleNotes).find((note) => note.id === sourceNoteId) ?? sourceNoteFallback
     : undefined;
+  const draftContext = sourceNoteId
+    ? `compound:${sourceNoteId}:${compoundInsertDirection ?? 'page'}`
+    : `standalone:${forcedKind}:${boardId || 'today'}:${categoryId || 'all'}`;
+  const draftKey = user?.id ? `${NewNoteDraftStorageKeyPrefix}:${user.id}:${draftContext}` : null;
+  const [hasHydratedDraft, setHasHydratedDraft] = useState(false);
 
   useEffect(() => {
     const focusTimer = setTimeout(() => {
@@ -240,6 +256,73 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   }, [user?.id]);
 
   useEffect(() => {
+    if (!draftKey) {
+      setHasHydratedDraft(true);
+      return;
+    }
+
+    let cancelled = false;
+    AsyncStorage.getItem(draftKey)
+      .then((storedDraft) => {
+        if (cancelled || !storedDraft) {
+          return;
+        }
+
+        try {
+          const draft = JSON.parse(storedDraft) as StoredNewNoteDraft;
+          setTitle(draft.title ?? '');
+          setBody(draft.body ?? '');
+          setNoteKind(draft.noteKind === 'library' ? 'library' : 'note');
+          setSelectedCategoryId(draft.selectedCategoryId ?? null);
+          setCategoryNavigationId(draft.categoryNavigationId ?? null);
+          setLibraryCategoryIds(Array.isArray(draft.libraryCategoryIds) ? draft.libraryCategoryIds : []);
+        } catch {
+          AsyncStorage.removeItem(draftKey).catch(() => undefined);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHasHydratedDraft(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (!hasHydratedDraft || !draftKey) {
+      return;
+    }
+
+    if (!title && !body && !selectedCategoryId && libraryCategoryIds.length === 0) {
+      AsyncStorage.removeItem(draftKey).catch(() => undefined);
+      return;
+    }
+
+    const draft: StoredNewNoteDraft = {
+      title,
+      body,
+      noteKind,
+      selectedCategoryId,
+      categoryNavigationId,
+      libraryCategoryIds,
+      savedAt: Date.now(),
+    };
+    AsyncStorage.setItem(draftKey, JSON.stringify(draft)).catch(() => undefined);
+  }, [
+    body,
+    categoryNavigationId,
+    draftKey,
+    hasHydratedDraft,
+    libraryCategoryIds,
+    noteKind,
+    selectedCategoryId,
+    title,
+  ]);
+
+  useEffect(() => {
     Animated.timing(todoCategorySheetProgress, {
       toValue: todoCategoryDrawerIndex,
       duration: 220,
@@ -266,6 +349,9 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
             ownerId: user?.id ?? '',
           }),
     onSuccess: async () => {
+      if (draftKey) {
+        await AsyncStorage.removeItem(draftKey);
+      }
       await queryClient.invalidateQueries({ queryKey: ['notes'] });
       router.replace(returnPath as never);
     },
@@ -581,7 +667,13 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
               style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
               <Ionicons name="arrow-back" size={24} color={theme.text} />
             </Pressable>
-            <View style={styles.headerSpacer} />
+            <View style={styles.headerSpacer}>
+              {hasHydratedDraft && canSave ? (
+                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+                  Saved locally
+                </ThemedText>
+              ) : null}
+            </View>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={noteKind === 'library' ? 'Switch to todo note' : 'Switch to library note'}

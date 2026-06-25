@@ -53,6 +53,12 @@ export type UpdateNoteInput = {
   categoryIds: string[];
 };
 
+export type UpdateNoteContentInput = {
+  id: string;
+  title: string;
+  body: string;
+};
+
 export type DeleteNoteInput = {
   id: string;
 };
@@ -574,6 +580,20 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
     if (categoryError) {
       throw categoryError;
     }
+  }
+}
+
+export async function updateNoteContent({ id, title, body }: UpdateNoteContentInput) {
+  const { error } = await supabase
+    .from('notes')
+    .update({
+      title: title.trim(),
+      body: body.trim(),
+    })
+    .eq('id', id);
+
+  if (error) {
+    throw error;
   }
 }
 
