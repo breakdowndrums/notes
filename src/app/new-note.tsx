@@ -1,6 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Alert, Animated, BackHandler, Keyboard, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Colors, MaxContentWidth, NoteSurfaceColor, Spacing } from '@/constants/theme';
-import { createCompoundNotePage, createNote, fetchNotesByKind } from '@/features/notes/note-api';
+import { createCompoundNotePage, createNote, fetchNotesByKind, updateNote, updateNoteContent } from '@/features/notes/note-api';
 import { libraryBoards, sampleBoards, sampleCategories, sampleLibraryNotes, sampleNotes } from '@/features/notes/sample-notes';
 import type { Note, NoteKind } from '@/features/notes/types';
 import { useTheme } from '@/hooks/use-theme';
@@ -19,6 +19,7 @@ const CategoryKeyboardLift = 56;
 const CategorySheetRowHeight = 48;
 const TodoCategoryStorageKeyPrefix = 'notes:todo-categories';
 const NewNoteDraftStorageKeyPrefix = 'notes:new-editor-draft';
+const NewNoteAutoSaveDelay = 1000;
 const categoryToneById: Record<string, { backgroundColor: string; textColor: string }> = {
   coding: { backgroundColor: '#123023', textColor: '#9bd7aa' },
   writing: { backgroundColor: '#142840', textColor: '#9dc7f4' },
@@ -33,6 +34,7 @@ type StoredTodoCategories = {
 };
 
 type StoredNewNoteDraft = {
+  createdNoteId?: string | null;
   title: string;
   body: string;
   noteKind: NoteKind;
@@ -41,6 +43,15 @@ type StoredNewNoteDraft = {
   libraryCategoryIds: string[];
   savedAt: number;
 };
+
+type NewNoteSnapshot = {
+  title: string;
+  body: string;
+  noteKind: NoteKind;
+  selectedCategoryId: string | null;
+};
+
+type NewNoteSaveStatus = 'local' | 'saved' | 'error';
 
 function getTodoCategoryStorageKey(userId?: string) {
   return `${TodoCategoryStorageKeyPrefix}:${userId ?? 'local'}`;
@@ -226,6 +237,17 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
     : `standalone:${forcedKind}:${boardId || 'today'}:${categoryId || 'all'}`;
   const draftKey = user?.id ? `${NewNoteDraftStorageKeyPrefix}:${user.id}:${draftContext}` : null;
   const [hasHydratedDraft, setHasHydratedDraft] = useState(false);
+  const [createdNoteId, setCreatedNoteId] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<NewNoteSaveStatus>('local');
+  const [isRemoteSaving, setIsRemoteSaving] = useState(false);
+  const createdNoteIdRef = useRef<string | null>(null);
+  const latestSnapshotRef = useRef<NewNoteSnapshot>({ title: '', body: '', noteKind: forcedKind, selectedCategoryId: categoryId || null });
+  const lastSyncedSnapshotRef = useRef<NewNoteSnapshot | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistSnapshotRef = useRef<(snapshot: NewNoteSnapshot, navigateAfterSave?: boolean) => Promise<void>>(
+    () => Promise.resolve(),
+  );
 
   useEffect(() => {
     const focusTimer = setTimeout(() => {
@@ -270,6 +292,9 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
 
         try {
           const draft = JSON.parse(storedDraft) as StoredNewNoteDraft;
+          const restoredNoteId = typeof draft.createdNoteId === 'string' ? draft.createdNoteId : null;
+          createdNoteIdRef.current = restoredNoteId;
+          setCreatedNoteId(restoredNoteId);
           setTitle(draft.title ?? '');
           setBody(draft.body ?? '');
           setNoteKind(draft.noteKind === 'library' ? 'library' : 'note');
@@ -302,6 +327,7 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
     }
 
     const draft: StoredNewNoteDraft = {
+      createdNoteId,
       title,
       body,
       noteKind,
@@ -314,6 +340,7 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   }, [
     body,
     categoryNavigationId,
+    createdNoteId,
     draftKey,
     hasHydratedDraft,
     libraryCategoryIds,
@@ -323,6 +350,35 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   ]);
 
   useEffect(() => {
+    latestSnapshotRef.current = {
+      title,
+      body,
+      noteKind,
+      selectedCategoryId,
+    };
+
+    if (!hasHydratedDraft || !canSave || !isSupabaseConfigured || !user) {
+      return;
+    }
+
+    setSaveStatus('local');
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    autoSaveTimerRef.current = setTimeout(() => {
+      persistSnapshotRef.current(latestSnapshotRef.current);
+    }, NewNoteAutoSaveDelay);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [body, canSave, hasHydratedDraft, isSupabaseConfigured, noteKind, selectedCategoryId, title, user]);
+
+  useEffect(() => {
     Animated.timing(todoCategorySheetProgress, {
       toValue: todoCategoryDrawerIndex,
       duration: 220,
@@ -330,62 +386,141 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
     }).start();
   }, [todoCategoryDrawerIndex, todoCategorySheetProgress]);
 
-  const saveMutation = useMutation({
-    mutationFn: () =>
-      sourceNote && compoundInsertDirection
-        ? createCompoundNotePage({
-            sourceNote,
-            direction: compoundInsertDirection,
-            title,
-            body,
-            ownerId: user?.id ?? '',
-          })
-        : createNote({
-            kind: noteKind,
-            title,
-            body,
-            boardIds: noteKind === 'library' ? [] : [boardId || 'today'],
-            categoryIds: selectedCategoryId ? [selectedCategoryId] : [],
-            ownerId: user?.id ?? '',
-          }),
-    onSuccess: async () => {
-      if (draftKey) {
-        await AsyncStorage.removeItem(draftKey);
-      }
-      await queryClient.invalidateQueries({ queryKey: ['notes'] });
-      router.replace(returnPath as never);
-    },
-    onError: (error) => {
-      Alert.alert('Could not save note', error instanceof Error ? error.message : 'Try again in a moment.');
-    },
-  });
+  function snapshotsMatch(first: NewNoteSnapshot | null, second: NewNoteSnapshot) {
+    return Boolean(
+      first &&
+      first.title === second.title &&
+      first.body === second.body &&
+      first.noteKind === second.noteKind &&
+      first.selectedCategoryId === second.selectedCategoryId,
+    );
+  }
 
-  function saveNote() {
+  function persistSnapshot(snapshot: NewNoteSnapshot, navigateAfterSave = false) {
     if (!isSupabaseConfigured || !user) {
-      Alert.alert('Sign in required', 'Sign in from Account before saving synced notes.');
-      return;
+      if (navigateAfterSave) {
+        Alert.alert('Sign in required', 'Sign in from Account before saving synced notes.');
+      }
+      return Promise.resolve();
     }
 
     if (compoundInsertDirection && !sourceNote) {
-      Alert.alert('Could not load linked todo', 'Open the source todo again and try adding the new page once more.');
-      return;
+      if (navigateAfterSave) {
+        Alert.alert('Could not load linked todo', 'Open the source todo again and try adding the new page once more.');
+      }
+      return Promise.resolve();
     }
 
-    if (!canSave || saveMutation.isPending) {
-      return;
+    if (!snapshot.title.trim() && !snapshot.body.trim()) {
+      return Promise.resolve();
     }
 
-    saveMutation.mutate();
+    saveQueueRef.current = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        setIsRemoteSaving(true);
+        const existingNoteId = createdNoteIdRef.current;
+        let savedNoteId = existingNoteId;
+
+        if (!existingNoteId) {
+          savedNoteId = sourceNote && compoundInsertDirection
+            ? await createCompoundNotePage({
+                sourceNote,
+                direction: compoundInsertDirection,
+                title: snapshot.title,
+                body: snapshot.body,
+                ownerId: user.id,
+              })
+            : await createNote({
+                kind: snapshot.noteKind,
+                title: snapshot.title,
+                body: snapshot.body,
+                boardIds: snapshot.noteKind === 'library' ? [] : [boardId || 'today'],
+                categoryIds: snapshot.selectedCategoryId ? [snapshot.selectedCategoryId] : [],
+                ownerId: user.id,
+              });
+
+          createdNoteIdRef.current = savedNoteId;
+          setCreatedNoteId(savedNoteId);
+          if (draftKey) {
+            const latestSnapshot = latestSnapshotRef.current;
+            await AsyncStorage.setItem(draftKey, JSON.stringify({
+              createdNoteId: savedNoteId,
+              title: latestSnapshot.title,
+              body: latestSnapshot.body,
+              noteKind: latestSnapshot.noteKind,
+              selectedCategoryId: latestSnapshot.selectedCategoryId,
+              categoryNavigationId,
+              libraryCategoryIds,
+              savedAt: Date.now(),
+            } satisfies StoredNewNoteDraft));
+          }
+        } else if (sourceNote && compoundInsertDirection) {
+          await updateNoteContent({
+            id: existingNoteId,
+            title: snapshot.title,
+            body: snapshot.body,
+          });
+        } else {
+          await updateNote({
+            kind: snapshot.noteKind,
+            id: existingNoteId,
+            title: snapshot.title,
+            body: snapshot.body,
+            boardIds: snapshot.noteKind === 'library' ? [] : [boardId || 'today'],
+            categoryIds: snapshot.selectedCategoryId ? [snapshot.selectedCategoryId] : [],
+          });
+        }
+
+        lastSyncedSnapshotRef.current = snapshot;
+        if (snapshotsMatch(lastSyncedSnapshotRef.current, latestSnapshotRef.current)) {
+          setSaveStatus('saved');
+          if (draftKey) {
+            await AsyncStorage.removeItem(draftKey);
+          }
+        } else {
+          setSaveStatus('local');
+        }
+
+        await queryClient.invalidateQueries({ queryKey: ['notes'] });
+        if (navigateAfterSave) {
+          router.replace(returnPath as never);
+        }
+      })
+      .catch((error) => {
+        setSaveStatus('error');
+        if (navigateAfterSave) {
+          Alert.alert('Could not save note', error instanceof Error ? error.message : 'Try again in a moment.');
+        }
+      })
+      .finally(() => {
+        setIsRemoteSaving(false);
+      });
+
+    return saveQueueRef.current;
   }
+  persistSnapshotRef.current = persistSnapshot;
 
   function closeComposer() {
     if (canSave) {
-      saveNote();
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      persistSnapshot(latestSnapshotRef.current, true);
       return;
     }
 
     router.replace(returnPath as never);
   }
+
+  const saveStatusLabel = saveStatus === 'error'
+    ? 'Sync failed · saved locally'
+    : saveStatus === 'saved'
+      ? 'Saved'
+      : user
+        ? 'Unsynced · saved locally'
+        : 'Local only · sign in to sync';
 
   function toggleNoteKind() {
     setNoteKind((current) => (current === 'library' ? 'note' : 'library'));
@@ -669,19 +804,19 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
             </Pressable>
             <View style={styles.headerSpacer}>
               {hasHydratedDraft && canSave ? (
-                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
-                  Saved locally
+                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.saveStatusText}>
+                  {saveStatusLabel}
                 </ThemedText>
               ) : null}
             </View>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={noteKind === 'library' ? 'Switch to todo note' : 'Switch to library note'}
-              disabled={saveMutation.isPending}
+              disabled={isRemoteSaving}
               onPress={toggleNoteKind}
               style={({ pressed }) => [
                 styles.kindToggleButton,
-                saveMutation.isPending && styles.disabled,
+                isRemoteSaving && styles.disabled,
                 pressed && styles.pressed,
               ]}>
               <Ionicons name={noteKind === 'library' ? 'albums-outline' : 'checkbox-outline'} size={21} color={theme.text} />
@@ -816,6 +951,12 @@ const styles = StyleSheet.create({
   },
   headerSpacer: {
     flex: 1,
+    alignItems: 'center',
+  },
+  saveStatusText: {
+    fontSize: 11,
+    lineHeight: 14,
+    opacity: 0.55,
   },
   kindToggleButton: {
     width: 44,

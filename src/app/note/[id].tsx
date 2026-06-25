@@ -57,7 +57,7 @@ type StoredEditorDraft = EditorSnapshot & {
   savedAt: number;
 };
 
-type AutoSaveStatus = 'saved' | 'local' | 'saving';
+type AutoSaveStatus = 'saved' | 'local' | 'saving' | 'error';
 
 function getNoteDraftStorageKey(noteId: string, userId: string) {
   return `${NoteDraftStorageKeyPrefix}:${userId}:${noteId}`;
@@ -247,7 +247,7 @@ export default function NoteDetailScreen() {
   const [savedCategoryId, setSavedCategoryId] = useState<string | null>(null);
   const [savedKind, setSavedKind] = useState<NoteKind>(initialNoteKind);
   const [hasHydratedDraft, setHasHydratedDraft] = useState(false);
-  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('saved');
+  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>(user ? 'saved' : 'local');
   const [isDiscardingChanges, setIsDiscardingChanges] = useState(false);
   const openingSnapshotRef = useRef<EditorSnapshot | null>(null);
   const noteAtOpenRef = useRef<Note | null>(null);
@@ -255,7 +255,8 @@ export default function NoteDetailScreen() {
   const latestSnapshotRef = useRef<EditorSnapshot | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const draftKey = user?.id ? getNoteDraftStorageKey(noteId, user.id) : null;
+  const draftOwnerId = user?.id ?? 'local';
+  const draftKey = getNoteDraftStorageKey(noteId, draftOwnerId);
   const selectedBoards = boards.filter((board) => selectedBoardIds.includes(board.id));
   const allTodoCategories = noteKind === 'note' ? getTodoCategories(notes, todoCategoryIds) : [];
   const allLibraryCategoryIds = noteKind === 'library' ? getLibraryCategoryIds(notes, libraryCategoryIds) : [];
@@ -332,6 +333,7 @@ export default function NoteDetailScreen() {
         queryClient.setQueryData(context.queryKey, context.previousNotes);
       }
 
+      setAutoSaveStatus('error');
       Alert.alert('Could not save note', error instanceof Error ? error.message : 'Try again in a moment.');
     },
     onSettled: async () => {
@@ -437,9 +439,9 @@ export default function NoteDetailScreen() {
       setSavedKind(noteKind);
       setLoadedNoteId(note.id);
       setHasHydratedDraft(false);
-      setAutoSaveStatus('saved');
+      setAutoSaveStatus(user ? 'saved' : 'local');
 
-      if (!draftKey || !user?.id) {
+      if (!draftKey) {
         setHasHydratedDraft(true);
         return;
       }
@@ -453,7 +455,7 @@ export default function NoteDetailScreen() {
 
           try {
             const draft = JSON.parse(storedDraft) as StoredEditorDraft;
-            if (draft.noteId !== note.id || draft.userId !== user.id) {
+            if (draft.noteId !== note.id || draft.userId !== draftOwnerId) {
               return;
             }
 
@@ -491,7 +493,7 @@ export default function NoteDetailScreen() {
         cancelled = true;
       };
     }
-  }, [draftKey, loadedNoteId, note, noteKind, user?.id]);
+  }, [draftKey, draftOwnerId, loadedNoteId, note, noteKind, user]);
 
   useEffect(() => {
     const currentSnapshot: EditorSnapshot = {
@@ -503,13 +505,13 @@ export default function NoteDetailScreen() {
     };
     latestSnapshotRef.current = currentSnapshot;
 
-    if (!hasHydratedDraft || !draftKey || !user || !note || isDiscardingChanges) {
+    if (!hasHydratedDraft || !draftKey || !note || isDiscardingChanges) {
       return;
     }
 
     const serverSnapshot = serverSnapshotRef.current;
     if (serverSnapshot && snapshotsMatch(currentSnapshot, serverSnapshot)) {
-      setAutoSaveStatus('saved');
+      setAutoSaveStatus(user ? 'saved' : 'local');
       AsyncStorage.removeItem(draftKey).catch(() => undefined);
       return;
     }
@@ -517,13 +519,13 @@ export default function NoteDetailScreen() {
     const storedDraft: StoredEditorDraft = {
       ...currentSnapshot,
       noteId,
-      userId: user.id,
+      userId: draftOwnerId,
       savedAt: Date.now(),
     };
     setAutoSaveStatus((current) => (current === 'saving' ? current : 'local'));
-    AsyncStorage.setItem(draftKey, JSON.stringify(storedDraft)).catch(() => undefined);
+    AsyncStorage.setItem(draftKey, JSON.stringify(storedDraft)).catch(() => setAutoSaveStatus('error'));
 
-    if (!canSave) {
+    if (!canSave || !user) {
       return;
     }
 
@@ -579,7 +581,7 @@ export default function NoteDetailScreen() {
           queryClient.invalidateQueries({ queryKey: ['notes'] }).catch(() => undefined);
         })
         .catch(() => {
-          setAutoSaveStatus('local');
+          setAutoSaveStatus('error');
         });
     }, AutoSaveDelay);
 
@@ -593,6 +595,7 @@ export default function NoteDetailScreen() {
     body,
     canSave,
     draftKey,
+    draftOwnerId,
     hasHydratedDraft,
     isDiscardingChanges,
     note,
@@ -679,6 +682,10 @@ export default function NoteDetailScreen() {
     setTimeout(refocusEditor, 140);
   }
 
+  function markUnsynced() {
+    setAutoSaveStatus('local');
+  }
+
   function persistNote() {
     if (!user) {
       Alert.alert('Sign in required', 'Sign in from Account before editing synced notes.');
@@ -734,16 +741,18 @@ export default function NoteDetailScreen() {
 
     try {
       await autoSaveQueueRef.current.catch(() => undefined);
-      await updateNote({
-        kind: openingSnapshot.kind,
-        id: noteId,
-        title: openingSnapshot.title,
-        body: openingSnapshot.body,
-        done: originalNote.done ?? false,
-        compound: openingSnapshot.kind === 'note' ? originalNote.compound ?? null : null,
-        boardIds: openingSnapshot.kind === 'library' ? [] : openingSnapshot.boardIds,
-        categoryIds: openingSnapshot.categoryId ? [openingSnapshot.categoryId] : [],
-      });
+      if (user) {
+        await updateNote({
+          kind: openingSnapshot.kind,
+          id: noteId,
+          title: openingSnapshot.title,
+          body: openingSnapshot.body,
+          done: originalNote.done ?? false,
+          compound: openingSnapshot.kind === 'note' ? originalNote.compound ?? null : null,
+          boardIds: openingSnapshot.kind === 'library' ? [] : openingSnapshot.boardIds,
+          categoryIds: openingSnapshot.categoryId ? [openingSnapshot.categoryId] : [],
+        });
+      }
 
       serverSnapshotRef.current = openingSnapshot;
       latestSnapshotRef.current = openingSnapshot;
@@ -758,7 +767,7 @@ export default function NoteDetailScreen() {
       setSavedBoardIds(openingSnapshot.boardIds);
       setSavedCategoryId(openingSnapshot.categoryId);
       setSavedKind(openingSnapshot.kind);
-      setAutoSaveStatus('saved');
+      setAutoSaveStatus(user ? 'saved' : 'local');
       await AsyncStorage.removeItem(draftKey);
       await queryClient.invalidateQueries({ queryKey: ['notes'] });
     } catch (error) {
@@ -863,6 +872,7 @@ export default function NoteDetailScreen() {
     const categoryId = categoryNavigationId ? `${categoryNavigationId}/${categorySlug}` : categorySlug;
 
     setIsEditing(true);
+    markUnsynced();
     setTodoCategoryIds((current) => (current.includes(categoryId) ? current : [...current, categoryId]));
     setSelectedCategoryId(categoryId);
     setCategoryNavigationId(categoryId);
@@ -934,6 +944,7 @@ export default function NoteDetailScreen() {
                 accessibilityState={{ selected: selectedCategoryId === currentCategory.id }}
                 onPress={() => {
                   setIsEditing(true);
+                  markUnsynced();
                   setSelectedCategoryId((current) => (current === currentCategory.id ? null : currentCategory.id));
                   keepEditorKeyboardOpen();
                 }}
@@ -963,6 +974,7 @@ export default function NoteDetailScreen() {
               accessibilityState={{ selected }}
               onPress={() => {
                 setIsEditing(true);
+                markUnsynced();
                 setIsCategorySheetOpen(true);
                 setCategoryNavigationId(category.id);
                 setSelectedCategoryId(category.id);
@@ -1033,6 +1045,7 @@ export default function NoteDetailScreen() {
                 accessibilityState={{ selected }}
                 onPress={() => {
                   setIsEditing(true);
+                  markUnsynced();
                   setSelectedCategoryId((current) => (current === category.id ? null : category.id));
                   keepEditorKeyboardOpen();
                 }}
@@ -1058,6 +1071,7 @@ export default function NoteDetailScreen() {
                 const categoryId = makeCategoryId(categoryDraft);
                 if (categoryId) {
                   setIsEditing(true);
+                  markUnsynced();
                   setLibraryCategoryIds((current) => (current.includes(categoryId) ? current : [...current, categoryId]));
                   setSelectedCategoryId(categoryId);
                 }
@@ -1133,10 +1147,12 @@ export default function NoteDetailScreen() {
     currentSnapshot &&
     !snapshotsMatch(openingSnapshot, currentSnapshot),
   );
-  const saveStatusLabel = autoSaveStatus === 'saving'
-    ? 'Saving...'
-    : autoSaveStatus === 'local'
-      ? 'Saved locally'
+  const saveStatusLabel = autoSaveStatus === 'error'
+      ? 'Sync failed · saved locally'
+    : autoSaveStatus === 'local' || autoSaveStatus === 'saving'
+      ? user
+        ? 'Unsynced · saved locally'
+        : 'Local only · sign in to sync'
       : 'Saved';
 
   useEffect(() => {
@@ -1169,7 +1185,7 @@ export default function NoteDetailScreen() {
               </Pressable>
             ) : null}
             <View style={styles.headerSpacer}>
-              <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+              <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.saveStatusText}>
                 {noteKind === 'note' && compoundNotes.length > 1
                   ? `${currentCompoundIndex + 1} of ${compoundNotes.length} · ${saveStatusLabel}`
                   : saveStatusLabel}
@@ -1296,7 +1312,10 @@ export default function NoteDetailScreen() {
                 <TextInput
                   ref={titleRef}
                   value={title}
-                  onChangeText={setTitle}
+                  onChangeText={(nextTitle) => {
+                    markUnsynced();
+                    setTitle(nextTitle);
+                  }}
                   onFocus={() => {
                     setIsEditing(true);
                     setFocusedField('title');
@@ -1309,7 +1328,10 @@ export default function NoteDetailScreen() {
                 <TextInput
                   ref={bodyRef}
                   value={body}
-                  onChangeText={setBody}
+                  onChangeText={(nextBody) => {
+                    markUnsynced();
+                    setBody(nextBody);
+                  }}
                   onFocus={() => {
                     setIsEditing(true);
                     setFocusedField('body');
@@ -1332,6 +1354,7 @@ export default function NoteDetailScreen() {
                         accessibilityLabel={`Remove board ${board.title}`}
                         onPress={() => {
                           setIsEditing(true);
+                          markUnsynced();
                           setSelectedBoardIds((current) => current.filter((boardId) => boardId !== board.id));
                         }}
                         style={({ pressed }) => [
@@ -1424,6 +1447,11 @@ const styles = StyleSheet.create({
   headerSpacer: {
     flex: 1,
     alignItems: 'center',
+  },
+  saveStatusText: {
+    fontSize: 11,
+    lineHeight: 14,
+    opacity: 0.55,
   },
   iconButton: {
     width: 44,

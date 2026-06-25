@@ -515,7 +515,7 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
   const cleanedBody = body.trim();
   const normalizedCompound = kind === 'note' ? normalizeCompoundTodoMeta(compound) : null;
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('notes')
     .update({
       kind,
@@ -524,7 +524,9 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
       done,
       workflow: normalizedCompound,
     })
-    .eq('id', id);
+    .eq('id', id)
+    .select('id')
+    .single();
 
   if (error) {
     if (isMissingWorkflowColumnError(error)) {
@@ -532,6 +534,10 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
     }
 
     throw error;
+  }
+
+  if (!data?.id) {
+    throw new Error('Supabase did not confirm that the note was saved.');
   }
 
   const uniqueBoardIds = kind === 'library' ? [] : [...new Set(boardIds.filter(Boolean))];
@@ -584,16 +590,22 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
 }
 
 export async function updateNoteContent({ id, title, body }: UpdateNoteContentInput) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('notes')
     .update({
       title: title.trim(),
       body: body.trim(),
     })
-    .eq('id', id);
+    .eq('id', id)
+    .select('id')
+    .single();
 
   if (error) {
     throw error;
+  }
+
+  if (!data?.id) {
+    throw new Error('Supabase did not confirm that the note was saved.');
   }
 }
 
