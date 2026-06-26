@@ -412,7 +412,7 @@ export async function fetchNotesByKind({ kind = 'note' }: FetchNotesInput = {}) 
 
 export async function createNote({ kind = 'note', title, body, compound = null, boardIds, categoryIds, ownerId }: CreateNoteInput) {
   const cleanedTitle = title.trim();
-  const cleanedBody = body.trim();
+  const cleanedBody = body;
   const normalizedCompound = kind === 'note' ? normalizeCompoundTodoMeta(compound) : null;
 
   const noteInsert = {
@@ -512,7 +512,7 @@ export async function createNote({ kind = 'note', title, body, compound = null, 
 
 export async function updateNote({ kind = 'note', id, title, body, done = false, compound = null, boardIds, categoryIds }: UpdateNoteInput) {
   const cleanedTitle = title.trim();
-  const cleanedBody = body.trim();
+  const cleanedBody = body;
   const normalizedCompound = kind === 'note' ? normalizeCompoundTodoMeta(compound) : null;
 
   const { error } = await supabase
@@ -604,7 +604,7 @@ export async function updateNote({ kind = 'note', id, title, body, done = false,
 
 export async function updateNoteContent({ id, title, body }: UpdateNoteContentInput) {
   const cleanedTitle = title.trim();
-  const cleanedBody = body.trim();
+  const cleanedBody = body;
   const { error } = await supabase
     .from('notes')
     .update({

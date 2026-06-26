@@ -254,6 +254,7 @@ export default function NoteDetailScreen() {
   const [savedKind, setSavedKind] = useState<NoteKind>(initialNoteKind);
   const [hasHydratedDraft, setHasHydratedDraft] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>(user ? 'saved' : 'local');
+  const [autoSaveErrorMessage, setAutoSaveErrorMessage] = useState('');
   const [isDiscardingChanges, setIsDiscardingChanges] = useState(false);
   const openingSnapshotRef = useRef<EditorSnapshot | null>(null);
   const noteAtOpenRef = useRef<Note | null>(null);
@@ -366,7 +367,7 @@ export default function NoteDetailScreen() {
   queueSupabaseAutoSaveRef.current = (snapshotToSave: EditorSnapshot | null) => {
     const sourceNote = note ?? noteAtOpenRef.current;
 
-    if (!snapshotToSave || !hasHydratedDraft || !draftKey || isDiscardingChanges || !user) {
+    if (!snapshotToSave || isDiscardingChanges || !user) {
       return;
     }
 
@@ -377,6 +378,7 @@ export default function NoteDetailScreen() {
     autoSaveQueueRef.current = autoSaveQueueRef.current
       .catch(() => undefined)
       .then(async () => {
+        setAutoSaveErrorMessage('');
         setAutoSaveStatus('saving');
         await updateNote({
           kind: snapshotToSave.kind,
@@ -397,7 +399,7 @@ export default function NoteDetailScreen() {
         setSavedKind(snapshotToSave.kind);
 
         if (latestSnapshotRef.current && snapshotsMatch(latestSnapshotRef.current, snapshotToSave)) {
-          await AsyncStorage.removeItem(draftKey);
+          await AsyncStorage.removeItem(draftKey).catch(() => undefined);
           setAutoSaveStatus('saved');
         } else {
           setAutoSaveStatus('local');
@@ -405,7 +407,10 @@ export default function NoteDetailScreen() {
 
         queryClient.invalidateQueries({ queryKey: ['notes'] }).catch(() => undefined);
       })
-      .catch(() => {
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : 'Supabase save failed.';
+        console.warn('Autosave failed', error);
+        setAutoSaveErrorMessage(message);
         setAutoSaveStatus('error');
       });
   };
@@ -570,25 +575,30 @@ export default function NoteDetailScreen() {
     };
     latestSnapshotRef.current = currentSnapshot;
 
-    if (!hasHydratedDraft || !draftKey || isDiscardingChanges) {
+    if (isDiscardingChanges) {
       return;
     }
 
     const serverSnapshot = serverSnapshotRef.current;
     if (serverSnapshot && snapshotsMatch(currentSnapshot, serverSnapshot)) {
       setAutoSaveStatus(user ? 'saved' : 'local');
-      AsyncStorage.removeItem(draftKey).catch(() => undefined);
+      setAutoSaveErrorMessage('');
+      if (draftKey) {
+        AsyncStorage.removeItem(draftKey).catch(() => undefined);
+      }
       return;
     }
 
-    const storedDraft: StoredEditorDraft = {
-      ...currentSnapshot,
-      noteId,
-      userId: draftOwnerId,
-      savedAt: Date.now(),
-    };
     setAutoSaveStatus((current) => (current === 'saving' ? current : 'local'));
-    AsyncStorage.setItem(draftKey, JSON.stringify(storedDraft)).catch(() => setAutoSaveStatus('error'));
+    if (hasHydratedDraft && draftKey) {
+      const storedDraft: StoredEditorDraft = {
+        ...currentSnapshot,
+        noteId,
+        userId: draftOwnerId,
+        savedAt: Date.now(),
+      };
+      AsyncStorage.setItem(draftKey, JSON.stringify(storedDraft)).catch(() => setAutoSaveStatus('error'));
+    }
 
     if (!canSave || !user) {
       return;
@@ -1165,7 +1175,7 @@ export default function NoteDetailScreen() {
     !snapshotsMatch(openingSnapshot, currentSnapshot),
   );
   const saveStatusLabel = autoSaveStatus === 'error'
-      ? 'Sync failed · saved locally'
+      ? autoSaveErrorMessage || 'Sync failed · saved locally'
     : autoSaveStatus === 'local' || autoSaveStatus === 'saving'
       ? user
         ? 'Unsynced · saved locally'
