@@ -2,7 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Alert, Animated, BackHandler, Keyboard, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, Animated, BackHandler, Keyboard, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useEffect, useRef, useState } from 'react';
 
@@ -26,6 +26,20 @@ const categoryToneById: Record<string, { backgroundColor: string; textColor: str
   work: { backgroundColor: '#342b12', textColor: '#e1c46a' },
 };
 const defaultCategoryTone = { backgroundColor: '#25282b', textColor: '#c8ced3' };
+const webEditorInputReset = Platform.select({
+  web: {
+    outlineStyle: 'none',
+    outlineWidth: 0,
+    outlineColor: 'transparent',
+    boxShadow: 'none',
+    caretColor: '#f5f6f7',
+  } as Record<string, unknown>,
+  default: {},
+});
+
+function didInsertNewline(previousValue: string, nextValue: string) {
+  return nextValue.split('\n').length > previousValue.split('\n').length;
+}
 
 type StoredTodoCategories = {
   customCategoryIds: string[];
@@ -501,6 +515,20 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   }
   persistSnapshotRef.current = persistSnapshot;
 
+  function flushNewNoteAutoSave(snapshot: NewNoteSnapshot) {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    if (!hasHydratedDraft || !snapshot.title.trim() && !snapshot.body.trim() || !isSupabaseConfigured || !user) {
+      return;
+    }
+
+    setSaveStatus('local');
+    persistSnapshotRef.current(snapshot);
+  }
+
   function closeComposer() {
     if (canSave) {
       if (autoSaveTimerRef.current) {
@@ -847,8 +875,10 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
               onChangeText={setTitle}
               placeholder="Title"
               placeholderTextColor={theme.textSecondary}
+              selectionColor={theme.text}
               style={[
                 styles.titleInput,
+                webEditorInputReset,
                 !title && isBodyFocused && styles.quietTitleInput,
                 { color: !title && isBodyFocused ? theme.textSecondary : theme.text },
               ]}
@@ -856,15 +886,33 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
             <TextInput
               ref={bodyInputRef}
               value={body}
-              onChangeText={setBody}
+              onChangeText={(nextBody) => {
+                const nextSnapshot: NewNoteSnapshot = {
+                  title,
+                  body: nextBody,
+                  noteKind,
+                  selectedCategoryId,
+                };
+                latestSnapshotRef.current = nextSnapshot;
+                setBody(nextBody);
+                if (didInsertNewline(body, nextBody)) {
+                  flushNewNoteAutoSave(nextSnapshot);
+                }
+              }}
               onFocus={() => setIsBodyFocused(true)}
               onBlur={() => setIsBodyFocused(false)}
+              onKeyPress={(event) => {
+                if (event.nativeEvent.key === 'Enter') {
+                  setTimeout(() => flushNewNoteAutoSave(latestSnapshotRef.current), 0);
+                }
+              }}
               autoFocus
               multiline
               textAlignVertical="top"
               placeholder="Note"
               placeholderTextColor={theme.textSecondary}
-              style={[styles.bodyInput, { color: theme.text }]}
+              selectionColor={theme.text}
+              style={[styles.bodyInput, webEditorInputReset, { color: theme.text }]}
             />
           </ScrollView>
 
