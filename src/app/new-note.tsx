@@ -20,6 +20,7 @@ const CategorySheetRowHeight = 48;
 const TodoCategoryStorageKeyPrefix = 'notes:todo-categories';
 const NewNoteDraftStorageKeyPrefix = 'notes:new-editor-draft';
 const NewNoteAutoSaveDelay = 1000;
+const EditorBodyMinHeight = 320;
 const categoryToneById: Record<string, { backgroundColor: string; textColor: string }> = {
   coding: { backgroundColor: '#123023', textColor: '#9bd7aa' },
   writing: { backgroundColor: '#142840', textColor: '#9dc7f4' },
@@ -33,6 +34,8 @@ const webEditorInputReset = Platform.select({
     outlineColor: 'transparent',
     boxShadow: 'none',
     caretColor: '#f5f6f7',
+    overflow: 'hidden',
+    resize: 'none',
   } as Record<string, unknown>,
   default: {},
 });
@@ -165,6 +168,7 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
   const [body, setBody] = useState('');
   const [noteKind, setNoteKind] = useState<NoteKind>(forcedKind);
   const [isBodyFocused, setIsBodyFocused] = useState(false);
+  const [bodyInputHeight, setBodyInputHeight] = useState(EditorBodyMinHeight);
   const bodyInputRef = useRef<TextInput>(null);
   const todoCategorySheetProgress = useRef(new Animated.Value(0)).current;
   const router = useRouter();
@@ -912,7 +916,17 @@ export function NewNoteComposer({ forcedKind = 'note' }: NewNoteComposerProps) {
               placeholder="Note"
               placeholderTextColor={theme.textSecondary}
               selectionColor={theme.text}
-              style={[styles.bodyInput, webEditorInputReset, { color: theme.text }]}
+              onContentSizeChange={(event) => {
+                if (Platform.OS === 'web') {
+                  setBodyInputHeight(Math.max(EditorBodyMinHeight, event.nativeEvent.contentSize.height));
+                }
+              }}
+              style={[
+                styles.bodyInput,
+                webEditorInputReset,
+                Platform.OS === 'web' && { height: bodyInputHeight },
+                { color: theme.text },
+              ]}
             />
           </ScrollView>
 

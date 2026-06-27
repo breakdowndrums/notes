@@ -38,6 +38,8 @@ const webEditorInputReset = Platform.select({
     outlineColor: 'transparent',
     boxShadow: 'none',
     caretColor: '#f5f6f7',
+    overflow: 'hidden',
+    resize: 'none',
   } as Record<string, unknown>,
   default: {},
 });
@@ -46,6 +48,7 @@ const CategoryKeyboardLift = 56;
 const CategorySheetRowHeight = 48;
 const NoteDraftStorageKeyPrefix = 'notes:editor-draft';
 const AutoSaveDelay = 1000;
+const EditorBodyMinHeight = 320;
 
 type StoredTodoCategories = {
   customCategoryIds: string[];
@@ -247,6 +250,7 @@ export default function NoteDetailScreen() {
   const [isEditing, setIsEditing] = useState(false);
   const [focusedField, setFocusedField] = useState<'title' | 'body' | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [bodyInputHeight, setBodyInputHeight] = useState(EditorBodyMinHeight);
   const [savedTitle, setSavedTitle] = useState('');
   const [savedBody, setSavedBody] = useState('');
   const [savedBoardIds, setSavedBoardIds] = useState<string[]>([]);
@@ -1385,7 +1389,17 @@ export default function NoteDetailScreen() {
                   placeholder="Note"
                   placeholderTextColor={theme.textSecondary}
                   selectionColor={theme.text}
-                  style={[styles.bodyInput, webEditorInputReset, { color: theme.text }]}
+                  onContentSizeChange={(event) => {
+                    if (Platform.OS === 'web') {
+                      setBodyInputHeight(Math.max(EditorBodyMinHeight, event.nativeEvent.contentSize.height));
+                    }
+                  }}
+                  style={[
+                    styles.bodyInput,
+                    webEditorInputReset,
+                    Platform.OS === 'web' && { height: bodyInputHeight },
+                    { color: theme.text },
+                  ]}
                 />
               </ScrollView>
 
